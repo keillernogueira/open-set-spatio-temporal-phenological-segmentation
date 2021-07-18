@@ -1,5 +1,7 @@
 import os
 import argparse
+import imageio
+import numpy as np
 
 import torch
 
@@ -23,11 +25,20 @@ class TwoWayDict(dict):
         return dict.__len__(self) // 2
 
 
-cedro = TwoWayDict({0: (0, 255, 255),
-                    1: (0, 0, 255),
-                    2: (255, 0, 0),
-                    3: (0, 255, 0),
-                    4: (0, 0, 0)})
+cedro = TwoWayDict({0: (0, 255, 255),  # blue / classes train 0 and test 4
+                    1: (0, 255, 0),  # green / classes train 1 and test 5
+                    2: (0, 0, 255),  # blue / classes train 2 and test 6
+                    3: (255, 0, 0),  # red / classes train 3 and test 7
+                    4: (0, 0, 0)})  # background / class 8
+
+
+def convert_pred_image_to_rgb(image, output_name):
+    h, w = image.shape
+    output = np.empty((h, w, 3), dtype=np.uint8)
+    for i in range(h):
+        for j in range(w):
+            output[i, j, :] = cedro[image[i, j]]
+    imageio.imwrite(output_name, output)
 
 
 def str2bool(v):

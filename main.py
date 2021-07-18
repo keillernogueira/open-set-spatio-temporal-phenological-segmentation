@@ -1,7 +1,9 @@
+import sys
 import datetime
+import joblib
 
-from networks import GRSL
-from dataloader import DataLoader
+from networks import GRSL, FCN8s
+from dataloader import DataLoader, PatchDataLoader, load_images, create_distributions, create_patch_distributions
 from config import *
 from utils import *
 from openpcs import *
@@ -53,14 +55,20 @@ def test(test_loader, net, epoch):
                 all_preds = np.concatenate((all_preds, prds))
                 all_pos = np.concatenate((all_pos, pos))
 
-        acc = accuracy_score(all_labels, all_preds)
-        conf_m = confusion_matrix(all_labels, all_preds)
+        if type(net) is not GRSL:  # not pixelwise
+            all_labels = all_labels.flatten()
+            all_preds = all_preds.flatten()
+            acc = accuracy_score(all_labels[all_labels != 8], all_preds[all_labels != 8])
+            conf_m = confusion_matrix(all_labels[all_labels != 8], all_preds[all_labels != 8])
+        else:
+            acc = accuracy_score(all_labels, all_preds)
+            conf_m = confusion_matrix(all_labels, all_preds)
 
         _sum = 0.0
         for k in range(len(conf_m)):
             _sum += (conf_m[k][k] / float(np.sum(conf_m[k])) if np.sum(conf_m[k]) != 0 else 0)
 
-        print("Validation/Test -- Epoch " + str(epoch) +
+        print(" ---- Validation/Test -- Epoch " + str(epoch) +
               " -- Time " + str(datetime.datetime.now().time()) +
               " Overall Accuracy= " + "{:.4f}".format(acc) +
               " Normalized Accuracy= " + "{:.4f}".format(_sum / float(outs.shape[1])) +
@@ -73,6 +81,8 @@ def test(test_loader, net, epoch):
 
 
 def train(train_loader, net, criterion, optimizer, epoch):
+    num_prints = ((len(train_loader.dataset.distr_data) / train_dataloader.batch_size) // NUM_DISPLAY_DURING_TRAIN)
+
     # Setting network for training mode.
     net.train()
 
@@ -117,9 +127,15 @@ def train(train_loader, net, criterion, optimizer, epoch):
         train_loss.append(loss.data.item())
 
         # Printing.
-        if (i + 1) % DISPLAY_STEP == 0:
-            acc = accuracy_score(labels, prds)
-            conf_m = confusion_matrix(labels, prds)
+        if (i + 1) % num_prints == 0:
+            if type(net) is not GRSL:  # not pixelwise
+                labels = labels.numpy().flatten()
+                prds = prds.flatten()
+                acc = accuracy_score(labels[labels != 8], prds[labels != 8])
+                conf_m = confusion_matrix(labels[labels != 8], prds[labels != 8])
+            else:
+                acc = accuracy_score(labels, prds)
+                conf_m = confusion_matrix(labels, prds)
 
             _sum = 0.0
             for k in range(len(conf_m)):
@@ -152,7 +168,7 @@ if __name__ == '__main__':
 
     # model options
     parser.add_argument('--network', type=str, required=True,
-                        help='Network model. Options: [grsl].')
+                        help='Network model. Options: [grsl, fcn].')
     parser.add_argument('--model_path', type=str, required=False, default=None,
                         help='Path to a trained model to be used during the inference.')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='Learning rate')
@@ -161,27 +177,38 @@ if __name__ == '__main__':
     parser.add_argument('--epoch_num', type=int, default=50, help='Number of epochs')
     args = parser.parse_args()
     print(args)
+    assert args.network == 'grsl' or args.network == 'fcn'
 
-    images, mask = DataLoader.load_images(args.dataset_path, args.images, args.patch_size)
+    images, mask = load_images(args.dataset_path, args.images, args.patch_size if args.network == 'grsl' else None)
     print(images.shape, mask.shape)
 
-    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), 'train_data.npy')):
-        train_data = np.load(os.path.join(os.path.abspath(os.getcwd()), 'train_data.npy'), allow_pickle=True)
-        test_data = np.load(os.path.join(os.path.abspath(os.getcwd()), 'test_data.npy'), allow_pickle=True)
-        no_data = np.load(os.path.join(os.path.abspath(os.getcwd()), 'no_data.npy'), allow_pickle=True)
+    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy')):
+        train_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy'),
+                             allow_pickle=True)
+        test_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_test_data.npy'),
+                            allow_pickle=True)
+        no_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_no_data.npy'),
+                          allow_pickle=True)
     else:
-        train_data, test_data, no_data = DataLoader.create_distributions_over_pixel_classes(mask, 4)
-        print(train_data.shape, test_data.shape, no_data.shape)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), 'train_data.npy'), train_data)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), 'test_data.npy'), test_data)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), 'no_data.npy'), no_data)
+        if args.network == 'grsl':
+            train_data, test_data, no_data = create_distributions(mask, 4)
+        else:
+            train_data, test_data, no_data = create_patch_distributions(mask, args.patch_size, 4)
+        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy'), train_data)
+        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_test_data.npy'), test_data)
+        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_no_data.npy'), no_data)
+    print(train_data.shape, test_data.shape, no_data.shape)
 
     # data loaders
-    train_dataset = DataLoader('Train', images, mask, train_data, args.patch_size)
+    if args.network == 'grsl':
+        train_dataset = DataLoader('Train', images, mask, train_data, args.patch_size)
+        test_dataset = DataLoader('Test', images, mask, test_data, args.patch_size)
+    else:
+        train_dataset = PatchDataLoader('Train', images, mask, train_data, args.patch_size)
+        test_dataset = PatchDataLoader('Test', images, mask, test_data, args.patch_size)
+
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                    shuffle=True, num_workers=NUM_WORKERS, drop_last=False)
-
-    test_dataset = DataLoader('Test', images, mask, test_data, args.patch_size)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                                   shuffle=False, num_workers=NUM_WORKERS, drop_last=False)
 
@@ -190,13 +217,20 @@ if __name__ == '__main__':
         model = GRSL(len(args.images), 3, train_dataset.num_classes).cuda()
         optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
                                betas=(0.9, 0.99))
+    elif args.network == 'fcn':
+        model = FCN8s(len(args.images), 3, train_dataset.num_classes).cuda()
+        optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
+                               betas=(0.9, 0.99))
     else:
         raise NotImplementedError("Network " + args.network + " not implemented")
 
     # loss
-    criterion = nn.CrossEntropyLoss().cuda()
-
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+    if args.network == 'grsl':
+        criterion = nn.CrossEntropyLoss().cuda()  # ignore class 8
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=8).cuda()  # ignore class 8
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     if args.operation == 'Train':
         curr_epoch = 1
@@ -228,22 +262,29 @@ if __name__ == '__main__':
         # Saving predictions.
         imageio.imwrite(os.path.join(args.output_path, 'prediction_closed_set_epoch' + str(epoch_num) + '.png'),
                         pred_image)
-
     elif args.operation == 'OpenPCS':
         assert args.model_path is not None, "For OpenPCS, flag model_path should be set."
 
-        all_dataset = DataLoader('OpenPCS', images, mask,
-                                 np.concatenate((train_data, test_data, no_data)), args.patch_size)
+        if args.network == 'grsl':
+            all_dataset = DataLoader('OpenPCS', images, mask,
+                                     np.concatenate((train_data, test_data, no_data)), args.patch_size)
+        else:
+            all_dataset = PatchDataLoader('OpenPCS', images, mask,
+                                          np.concatenate((train_data, test_data, no_data)), args.patch_size)
+
+        print(np.concatenate((train_data, test_data, no_data)).shape)
         all_dataloader = torch.utils.data.DataLoader(all_dataset, batch_size=args.batch_size,
                                                      shuffle=False, num_workers=NUM_WORKERS, drop_last=False)
 
         ckpt = torch.load(args.model_path)
         model.load_state_dict(ckpt)
         model.cuda()
-        if os.path.isfile(os.path.join(args.output_path, 'model_pca.pkl')):
-            model_full = joblib.load(os.path.join(args.output_path, 'model_pca.pkl'))
+        if os.path.isfile(os.path.join(args.output_path, args.network + '_model_pca.pkl')):
+            model_full = joblib.load(os.path.join(args.output_path, args.network + '_model_pca.pkl'))
         else:
-            model_full = train_openset(train_dataloader, model, train_dataset.num_classes, args.output_path)
-        test_openset(all_dataloader, model, model_full, all_dataset, args.output_path)
+            model_full = train_openset(train_dataloader, model)
+            joblib.dump(model_full, os.path.join(args.output_path, args.network + '_model_pca.pkl'))
+        # test_openset(all_dataloader, model, model_full, args.output_path)
+        evaluate_tpr(model_full, args.output_path)
     else:
         raise NotImplementedError("Operation " + args.operation + " not implemented")

@@ -2,6 +2,7 @@ import os
 import argparse
 import imageio
 import numpy as np
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 
 import torch
 
@@ -25,11 +26,12 @@ class TwoWayDict(dict):
         return dict.__len__(self) // 2
 
 
-cedro = TwoWayDict({0: (0, 255, 255),  # blue / classes train 0 and test 4
+cedro = TwoWayDict({0: (0, 255, 255),  # cyan / classes train 0 and test 4
                     1: (0, 255, 0),  # green / classes train 1 and test 5
                     2: (0, 0, 255),  # blue / classes train 2 and test 6
                     3: (255, 0, 0),  # red / classes train 3 and test 7
                     4: (0, 0, 0)})  # background / class 8
+lookup_class = np.array([cedro[i] for i in range(5)], dtype=np.uint8)
 
 
 def convert_pred_image_to_rgb(image, output_name):
@@ -57,8 +59,8 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_cls, cm):
-    if len(best_records) < 5:
+def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_cls, cm, num_saves=5):
+    if len(best_records) < num_saves:
         best_records.append({'epoch': epoch, 'acc': acc, 'acc_cls': acc_cls, 'cm': cm})
 
         torch.save(net.state_dict(), os.path.join(output_path, 'model_' + str(epoch) + '.pth'))
@@ -66,7 +68,7 @@ def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_
     else:
         # find min saved acc
         min_index = 0
-        for i, r in enumerate(best_records):
+        for i in range(len(best_records)):
             if best_records[min_index]['acc_cls'] > best_records[i]['acc_cls']:
                 min_index = i
         # check if currect acc is greater than min saved acc
@@ -83,3 +85,29 @@ def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_
             # save current model
             torch.save(net.state_dict(), os.path.join(output_path, 'model_' + str(epoch) + '.pth'))
             torch.save(optimizer.state_dict(), os.path.join(output_path, 'opt_' + str(epoch) + '.pth'))
+    np.save(os.path.join(output_path, 'best_records.npy'), best_records)
+
+
+def evaluate_map(true_map, pred_map, hidden_class):
+    all_labels = []
+    all_preds = []
+    for c in range(0, 4):
+        if c == hidden_class:
+            continue
+        if all_labels is None:
+            all_labels = true_map[true_map == c + 4] - 4
+            all_preds = pred_map[true_map == c + 4]
+        else:
+            all_labels = np.concatenate((all_labels, true_map[true_map == c + 4] - 4))
+            all_preds = np.concatenate((all_preds, pred_map[true_map == c + 4]))
+    print(np.asarray(all_labels).shape, np.asarray(all_preds).shape,
+          np.bincount(np.asarray(all_labels).astype(int)), np.bincount(np.asarray(all_preds).astype(int)))
+
+    acc = accuracy_score(all_labels, all_preds)
+    bacc = balanced_accuracy_score(all_labels, all_preds)
+    conf_m = confusion_matrix(all_labels, all_preds)
+
+    print(" Overall Accuracy= " + "{:.4f}".format(acc) +
+          " Normalized Accuracy= " + "{:.4f}".format(bacc) +
+          " Confusion Matrix= " + np.array_str(conf_m).replace("\n", "")
+          )

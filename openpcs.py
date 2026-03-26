@@ -92,11 +92,12 @@ def fit_pca_model(feat_np, true_np, prds_np, cl, n_components):
 
 def fit_quantiles(model_list, feat_np, prds_np, num_classes):
     # Acquiring scores for training set sample.
-    scores = np.zeros_like(prds_np, dtype=np.float)
+    scores = np.zeros_like(prds_np, dtype=np.float32)
 
     for c in range(num_classes):
         feat_msk = (prds_np == c)
         if np.any(feat_msk):
+            print('feat class', c)
             scores[feat_msk] = model_list[c].score_samples(feat_np[feat_msk, :])
             # print(c, feat_np[feat_msk, :].shape, np.isinf(scores).any(), np.min(scores), np.max(scores))
 
@@ -121,16 +122,12 @@ def train_openset(train_loader, net, n_components=64):
 
         # Casting tensors to cuda.
         inputs_c, labels_c = inputs.cuda(), labels.cuda()
-        inputs_c.squeeze_(0)
-        labels_c.squeeze_(0)
-
         # Casting to cuda variables.
         inps = Variable(inputs_c).cuda()
         labs = Variable(labels_c).cuda()
 
         # Forwarding.
         outs, fc1, fc2 = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
-
         # Computing loss.
         soft_outs = F.softmax(outs, dim=1)
         # Obtaining predictions.
@@ -157,21 +154,19 @@ def train_openset(train_loader, net, n_components=64):
     feature_list = normalize(np.asarray(feature_list), norm='l2', axis=1, copy=False)
     pred_list = np.asarray(pred_list)
     label_list = np.asarray(label_list)
-
-    print(feature_list.shape, pred_list.shape, label_list.shape)
-    # print(np.isnan(feature_list).any(), np.isnan(pred_list).any(), np.isnan(label_list).any())
-    # print(np.min(feature_list), np.max(feature_list))
+    # print('2', feature_list.shape, pred_list.shape, label_list.shape)
+    # print('3', np.bincount(label_list), np.bincount(pred_list))
 
     model_list = []
     conv_matrixes = []
-    for c in range(train_loader.dataset.num_classes):
+    for c in range(train_loader.dataset.num_classes - 1):
         print('Fitting model for class %d...' % c)
         # Computing PCA models from features.
         model, conv_matrix = fit_pca_model(feature_list, label_list, pred_list, c, n_components)
         model_list.append(model)
         conv_matrixes.append(conv_matrix)
 
-    scr_thresholds = fit_quantiles(model_list, feature_list, pred_list, train_loader.dataset.num_classes)
+    scr_thresholds = fit_quantiles(model_list, feature_list, pred_list, train_loader.dataset.num_classes - 1)
     print(scr_thresholds)
 
     return {'generative': model_list, 'cov_matrix': conv_matrixes, 'thresholds': scr_thresholds}
@@ -180,7 +175,7 @@ def train_openset(train_loader, net, n_components=64):
 def test_openset(loader, net, model_full, output_path):
     h, w = loader.dataset.mask.shape
 
-    pred_original = np.full((h, w), fill_value=-1, dtype=np.int)
+    pred_original = np.full((h, w), fill_value=-1, dtype=int)
     # pred_post = np.full((h, w), fill_value=-1, dtype=np.int)
     score_pca = np.full((h, w), fill_value=-1, dtype=np.float16)
     count = 0
@@ -191,16 +186,13 @@ def test_openset(loader, net, model_full, output_path):
     # Iterating over batches.
     for i, data in enumerate(loader):
         # Obtaining data and labels
-        inputs, labels, pos = data[0], data[1], data[2]
+        inputs, labels, pos, true_labels = data[0], data[1], data[2], data[3]
 
         # Casting tensors to cuda.
-        inputs_c = inputs.cuda()  # , labels.cuda()
-        inputs_c.squeeze_(0)
-        # labels_c.squeeze_(0)
+        inputs_c = inputs.cuda()
 
         # Casting to cuda variables.
         inps = Variable(inputs_c).cuda()
-        # labs = Variable(labels_c).cuda()
 
         # Forwarding.
         outs, fc1, fc2 = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
@@ -210,8 +202,7 @@ def test_openset(loader, net, model_full, output_path):
         soft_outs = F.softmax(outs, dim=1)
         prds = soft_outs.data.max(1)[1]
         preds_numpy = prds.detach().cpu().numpy()
-
-        print('1', preds_numpy.shape, np.min(preds_numpy), np.max(preds_numpy))
+        print('1', true_labels.shape, preds_numpy.shape)
 
         # Concatenating features
         features = torch.cat([outs.squeeze(), fc1.squeeze(), fc2.squeeze()], 1).detach().cpu().numpy()
@@ -220,8 +211,9 @@ def test_openset(loader, net, model_full, output_path):
             features = np.reshape(features, (-1, features.shape[-1]))
             preds_numpy = preds_numpy.ravel()
         features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
+        print('1', true_labels.shape, preds_numpy.shape, features.shape)
 
-        prds_post, scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes,
+        prds_post, scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes-1,
                                            model_full['thresholds'][15])
         # print('3', type(scores), type(scores[0]), scores.shape, np.min(scores), np.max(scores),
         #       type(prds_post), type(prds_post[0]), prds_post.shape, np.min(prds_post), np.max(prds_post),

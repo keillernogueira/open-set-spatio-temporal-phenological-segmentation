@@ -4,11 +4,10 @@ import joblib
 
 from networks import GRSL, FCN8s
 from dataloader import DataLoader, PatchDataLoader, load_images, create_distributions, create_patch_distributions
-from config import *
 from utils import *
 from openpcs import *
 
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 
 import torch
 from torch import optim
@@ -17,7 +16,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 
 
-def test(test_loader, net, epoch):
+def test(test_loader, net, epoch, ignore_index=8):
     # Setting network for evaluation mode.
     net.eval()
 
@@ -27,24 +26,18 @@ def test(test_loader, net, epoch):
     with torch.no_grad():
         # Iterating over batches.
         for i, data in enumerate(test_loader):
-
             # Obtaining images, labels and paths for batch.
             inps, labs, pos = data[0], data[1], data[2]
-
-            inps = inps.squeeze()
-            labs = labs.squeeze()
-
-            # Casting to cuda variables.
             inps_c = Variable(inps).cuda()
-            # labs_c = Variable(labs).cuda()
 
             # Forwarding.
             outs, _, _ = net(inps_c.permute(1, 0, 2, 3, 4))
             # Computing probabilities.
             soft_outs = F.softmax(outs, dim=1)
-
             # Obtaining prior predictions.
             prds = soft_outs.cpu().data.numpy().argmax(axis=1)
+
+            print(inps_c.permute(1, 0, 2, 3, 4).shape, soft_outs.shape, prds.shape)
 
             if all_labels is None:
                 all_labels = labs
@@ -58,49 +51,36 @@ def test(test_loader, net, epoch):
         if type(net) is not GRSL:  # not pixelwise
             all_labels = all_labels.flatten()
             all_preds = all_preds.flatten()
-            acc = accuracy_score(all_labels[all_labels != 8], all_preds[all_labels != 8])
-            conf_m = confusion_matrix(all_labels[all_labels != 8], all_preds[all_labels != 8])
+            valid_labels = all_labels[all_labels != ignore_index]
+            valid_preds = all_preds[all_labels != ignore_index]
+            acc = accuracy_score(valid_labels, valid_preds)
+            bacc = balanced_accuracy_score(valid_labels, valid_preds)
+            conf_m = confusion_matrix(valid_labels, valid_preds)
         else:
             acc = accuracy_score(all_labels, all_preds)
+            bacc = balanced_accuracy_score(all_labels, all_preds)
             conf_m = confusion_matrix(all_labels, all_preds)
-
-        _sum = 0.0
-        for k in range(len(conf_m)):
-            _sum += (conf_m[k][k] / float(np.sum(conf_m[k])) if np.sum(conf_m[k]) != 0 else 0)
 
         print(" ---- Validation/Test -- Epoch " + str(epoch) +
               " -- Time " + str(datetime.datetime.now().time()) +
               " Overall Accuracy= " + "{:.4f}".format(acc) +
-              " Normalized Accuracy= " + "{:.4f}".format(_sum / float(outs.shape[1])) +
+              " Normalized Accuracy= " + "{:.4f}".format(bacc) +
               " Confusion Matrix= " + np.array_str(conf_m).replace("\n", "")
               )
-
         sys.stdout.flush()
 
-    return acc, _sum / float(outs.shape[1]), conf_m, all_labels, all_preds, all_pos
+    return acc, bacc, conf_m, all_labels, all_preds, all_pos
 
 
-def train(train_loader, net, criterion, optimizer, epoch):
-    num_prints = ((len(train_loader.dataset.distr_data) / train_dataloader.batch_size) // NUM_DISPLAY_DURING_TRAIN)
-
-    # Setting network for training mode.
+def train(train_loader, net, criterion, optimizer, epoch, ignore_index=8):
     net.train()
-
-    # Average Meter for batch loss.
     train_loss = list()
-
-    # Iterating over batches.
     for i, data in enumerate(train_loader):
         # Obtaining data and labels
         inputs, labels = data[0], data[1]
-        # print(inputs.shape, labels)
 
         # Casting tensors to cuda.
         inputs_c, labels_c = inputs.cuda(), labels.cuda()
-        inputs_c.squeeze_(0)
-        labels_c.squeeze_(0)
-
-        # Casting to cuda variables.
         inps = Variable(inputs_c).cuda()
         labs = Variable(labels_c).cuda()
 
@@ -113,8 +93,7 @@ def train(train_loader, net, criterion, optimizer, epoch):
 
         # Obtaining predictions.
         prds = soft_outs.cpu().data.numpy().argmax(axis=1)
-        # print(soft_outs.data, prds, type(prds))
-        # print(inps.permute(1, 0, 2, 3, 4).shape, labs.shape, prds.shape)
+        print(inps.permute(1, 0, 2, 3, 4).shape, labs.shape, prds.shape)
 
         # Computing loss.
         loss = criterion(outs, labs)
@@ -127,25 +106,25 @@ def train(train_loader, net, criterion, optimizer, epoch):
         train_loss.append(loss.data.item())
 
         # Printing.
-        if (i + 1) % num_prints == 0:
+        if i > 0 and i % 10 == 0:
             if type(net) is not GRSL:  # not pixelwise
                 labels = labels.numpy().flatten()
                 prds = prds.flatten()
-                acc = accuracy_score(labels[labels != 8], prds[labels != 8])
-                conf_m = confusion_matrix(labels[labels != 8], prds[labels != 8])
+                valid_labels = labels[labels != ignore_index]
+                valid_preds = prds[labels != ignore_index]
+                acc = accuracy_score(valid_labels, valid_preds)
+                bacc = balanced_accuracy_score(valid_labels, valid_preds)
+                conf_m = confusion_matrix(valid_labels, valid_preds)
             else:
                 acc = accuracy_score(labels, prds)
+                bacc = balanced_accuracy_score(labels, prds)
                 conf_m = confusion_matrix(labels, prds)
-
-            _sum = 0.0
-            for k in range(len(conf_m)):
-                _sum += (conf_m[k][k] / float(np.sum(conf_m[k])) if np.sum(conf_m[k]) != 0 else 0)
 
             print("Training -- Epoch " + str(epoch) + " -- Iter " + str(i+1) + "/" + str(len(train_loader)) +
                   " -- Time " + str(datetime.datetime.now().time()) +
                   " -- Training Minibatch: Loss= " + "{:.6f}".format(train_loss[-1]) +
                   " Overall Accuracy= " + "{:.4f}".format(acc) +
-                  " Normalized Accuracy= " + "{:.4f}".format(_sum / float(outs.shape[1])) +
+                  " Normalized Accuracy= " + "{:.4f}".format(bacc) +
                   " Confusion Matrix= " + np.array_str(conf_m).replace("\n", "")
                   )
 
@@ -157,7 +136,7 @@ if __name__ == '__main__':
 
     # general options
     parser.add_argument('--operation', type=str, required=True,
-                        help='Operation. Options: [Train | Test | OpenPCS]')
+                        help='Operation', choices=['Train', 'Test', 'OpenPCS'])
     parser.add_argument('--output_path', type=str, required=True,
                         help='Path to save outcomes (such as images and trained models) of the algorithm.')
 
@@ -165,10 +144,12 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_path', type=str, required=True, help='Dataset path.')
     parser.add_argument('--images', type=str, nargs="+", required=True, help='Image/timestamp names.')
     parser.add_argument('--patch_size', type=int, required=False, default=25, help='Patch size.')
+    parser.add_argument('--hidden_class', type=int, required=True,
+                        help='Hidden class for open-set. Values from 0 to 3.')
 
     # model options
     parser.add_argument('--network', type=str, required=True,
-                        help='Network model. Options: [grsl, fcn].')
+                        help='Network model. grsl option is deprecated.', choices=['grsl', 'fcn'])
     parser.add_argument('--model_path', type=str, required=False, default=None,
                         help='Path to a trained model to be used during the inference.')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='Learning rate')
@@ -183,54 +164,46 @@ if __name__ == '__main__':
     print(images.shape, mask.shape)
 
     if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy')):
-        train_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy'),
-                             allow_pickle=True)
-        test_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_test_data.npy'),
-                            allow_pickle=True)
-        no_data = np.load(os.path.join(os.path.abspath(os.getcwd()), args.network + '_no_data.npy'),
-                          allow_pickle=True)
+        train_data = np.load(args.network + '_train_data.npy', allow_pickle=True)
+        test_data = np.load(args.network + '_test_data.npy', allow_pickle=True)
+        openset_data = np.load(args.network + '_openset_data.npy', allow_pickle=True)
     else:
         if args.network == 'grsl':
-            train_data, test_data, no_data = create_distributions(mask, 4)
+            train_data, test_data, openset_data = create_distributions(mask, 4)
         else:
-            train_data, test_data, no_data = create_patch_distributions(mask, args.patch_size, 4)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy'), train_data)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_test_data.npy'), test_data)
-        np.save(os.path.join(os.path.abspath(os.getcwd()), args.network + '_no_data.npy'), no_data)
-    print(train_data.shape, test_data.shape, no_data.shape)
+            train_data, test_data, openset_data = create_patch_distributions(mask, args.patch_size,
+                                                                             args.hidden_class, num_classes=4)
+        np.save(args.network + '_train_data.npy', train_data)
+        np.save(args.network + '_test_data.npy', test_data)
+        np.save(args.network + '_openset_data.npy', openset_data)
+    print(train_data.shape, test_data.shape, openset_data.shape)
 
     # data loaders
     if args.network == 'grsl':
         train_dataset = DataLoader('Train', images, mask, train_data, args.patch_size)
         test_dataset = DataLoader('Test', images, mask, test_data, args.patch_size)
     else:
-        train_dataset = PatchDataLoader('Train', images, mask, train_data, args.patch_size)
-        test_dataset = PatchDataLoader('Test', images, mask, test_data, args.patch_size)
+        train_dataset = PatchDataLoader('Train', images, mask, train_data, args.patch_size, args.hidden_class)
+        test_dataset = PatchDataLoader('Test', images, mask, test_data, args.patch_size, args.hidden_class)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, num_workers=NUM_WORKERS, drop_last=False)
+                                                   shuffle=True, num_workers=4, drop_last=False)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
-                                                  shuffle=False, num_workers=NUM_WORKERS, drop_last=False)
+                                                  shuffle=False, num_workers=4, drop_last=False)
 
     # network
     if args.network == 'grsl':
         model = GRSL(len(args.images), 3, train_dataset.num_classes).cuda()
-        optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
-                               betas=(0.9, 0.99))
+        criterion = nn.CrossEntropyLoss().cuda()  # ignore class 8
     elif args.network == 'fcn':
-        model = FCN8s(len(args.images), 3, train_dataset.num_classes).cuda()
-        optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
-                               betas=(0.9, 0.99))
+        model = FCN8s(len(args.images), 3, train_dataset.num_classes - 1).cuda()
+        criterion = nn.CrossEntropyLoss(ignore_index=8).cuda()  # ignore class 8
     else:
         raise NotImplementedError("Network " + args.network + " not implemented")
 
-    # loss
-    if args.network == 'grsl':
-        criterion = nn.CrossEntropyLoss().cuda()  # ignore class 8
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
-    else:
-        criterion = nn.CrossEntropyLoss(ignore_index=8).cuda()  # ignore class 8
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
+                           betas=(0.9, 0.99))
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     if args.operation == 'Train':
         curr_epoch = 1
@@ -238,11 +211,10 @@ if __name__ == '__main__':
         print("Training")
         for epoch in range(curr_epoch, args.epoch_num + 1):
             train(train_dataloader, model, criterion, optimizer, epoch)
-            if epoch % VAL_INTERVAL == 0:
-                # Computing test.
-                acc, nacc, cm, _, _, _ = test(test_dataloader, model, epoch)
 
-                save_best_models(model, optimizer, args.output_path, best_records, epoch, acc, nacc, cm)
+            # Computing test.
+            acc, nacc, cm, _, _, _ = test(test_dataloader, model, epoch)
+            save_best_models(model, optimizer, args.output_path, best_records, epoch, acc, nacc, cm)
 
             scheduler.step()
     elif args.operation == 'Test':

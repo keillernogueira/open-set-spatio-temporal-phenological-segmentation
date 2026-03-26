@@ -6,57 +6,24 @@ import torch
 from torch.utils import data
 
 
-def manipulate_border_array(data, crop_size):
-    mask = int(crop_size / 2)
-    # print data.shape
-
-    h, w = len(data), len(data[0])
-    crop_left = data[0:h, 0:crop_size, :]
-    crop_right = data[0:h, w - crop_size:w, :]
-    crop_top = data[0:crop_size, 0:w, :]
-    crop_bottom = data[h - crop_size:h, 0:w, :]
-
-    mirror_left = np.fliplr(crop_left)
-    mirror_right = np.fliplr(crop_right)
-    flipped_top = np.flipud(crop_top)
-    flipped_bottom = np.flipud(crop_bottom)
-
-    h_new, w_new = h + mask * 2, w + mask * 2
-    data_border = np.zeros((h_new, w_new, len(data[0][0])))
-    # print data_border.shape
-    data_border[mask:h + mask, mask:w + mask, :] = data
-
-    data_border[mask:h + mask, 0:mask, :] = mirror_left[:, mask + 1:, :]
-    data_border[mask:h + mask, w_new - mask:w_new, :] = mirror_right[:, 0:mask, :]
-    data_border[0:mask, mask:w + mask, :] = flipped_top[mask + 1:, :, :]
-    data_border[h + mask:h + mask + mask, mask:w + mask, :] = flipped_bottom[0:mask, :, :]
-
-    data_border[0:mask, 0:mask, :] = flipped_top[mask + 1:, 0:mask, :]
-    data_border[0:mask, w + mask:w + mask + mask, :] = flipped_top[mask + 1:, w - mask:w, :]
-    data_border[h + mask:h + mask + mask, 0:mask, :] = flipped_bottom[0:mask, 0:mask, :]
-    data_border[h + mask:h + mask + mask, w + mask:w + mask + mask, :] = flipped_bottom[0:mask, w - mask:w, :]
-
-    # scipy.misc.imsave('C:\\Users\\Keiller\\Desktop\\outfile.jpg', data_border)
-    return data_border
-
-
 def load_images(dataset_path, images, patch_size):
     data = []
 
     for name in images:
         try:
-            img = imageio.imread(os.path.join(dataset_path, name + '.tif'))
+            img = imageio.v2.imread(os.path.join(dataset_path, name + '.tif'))
             print(name, img.shape)
             # img_as_float(imageio.imread(os.path.join(dataset_path, name)))
         except IOError:
             raise IOError("Could not open file: ", os.path.join(dataset_path, name))
 
         if patch_size is not None:
-            data.append(manipulate_border_array(img, patch_size))
+            data.append(np.pad(img, pad_width=((patch_size//2, patch_size//2), (patch_size//2, patch_size//2), (0, 0)),
+                               mode='reflect'))
         else:
             data.append(img)
     try:
-        mask = imageio.imread(os.path.join(dataset_path, "mask_train_test_int.png"))
+        mask = imageio.v2.imread(os.path.join(dataset_path, "mask_train_test_int.png"))
     except IOError:
         raise IOError("Could not open file: " + os.path.join(dataset_path, "mask_train_test_int.png"))
 
@@ -93,13 +60,12 @@ def create_distributions(labels, num_classes):
     return train_data, test_data, np.asarray(no_classes_instances)
 
 
-def create_patch_distributions(labels, patch_size, num_classes):
-    training_instances = [[[] for i in range(0)] for i in range(num_classes)]
-    testing_instances = [[[] for i in range(0)] for i in range(num_classes)]
-    no_classes_instances = []
+def create_patch_distributions(labels, patch_size, hidden_class, num_classes):
+    training_instances = []
+    testing_instances = []
+    openset_instances = []
 
     w, h = labels.shape
-
     stride = patch_size // 2
     for i in range(0, w, stride):
         for j in range(0, h, stride):
@@ -118,36 +84,29 @@ def create_patch_distributions(labels, patch_size, num_classes):
             elif len(patch_class[0]) != patch_size:
                 cur_y = cur_y - (patch_size - len(patch_class[0]))
                 patch_class = labels[cur_x:cur_x + patch_size, cur_y:cur_y + patch_size]
-
             # double check
             assert patch_class.shape == (patch_size, patch_size), "Error create_distributions_over_classes: " \
                                                                   "Current patch size is " + str(len(patch_class)) + \
                                                                   "x" + str(len(patch_class[0]))
 
-            count = np.bincount(patch_class.astype(int).flatten())
-            # print(count)
-            if count[-1] == patch_size * patch_size:
-                no_classes_instances.append((cur_x, cur_y, count))
+            count = np.bincount(patch_class.astype(int).flatten(), minlength=9)
+            print('1', count)
+            train_sum = np.sum([x for x in count[0:4] if x != hidden_class])
+            test_sum = np.sum([x for x in count[4:8] if x != hidden_class+4])
+            openset_sum = count[hidden_class] + count[hidden_class+4]
+            print('2', hidden_class, train_sum, test_sum, openset_sum)
+            if openset_sum > 0:
+                print('openset', hidden_class, train_sum, test_sum, openset_sum)
+                openset_instances.append((cur_x, cur_y))
+
+            if train_sum > test_sum and train_sum > openset_sum:
+                print('train', hidden_class, train_sum, test_sum, openset_sum)
+                training_instances.append((cur_x, cur_y))
             else:
-                train_count = np.sum(count[0:4])
-                train_max = np.argmax(count[0:4])
-                test_count = np.sum(count[4:8])
-                test_max = np.argmax(count[4:8])
-                if train_count > test_count:
-                    training_instances[train_max].append((cur_x, cur_y, count))
-                else:
-                    testing_instances[test_max].append((cur_x, cur_y, count))
+                print('test', hidden_class, train_sum, test_sum, openset_sum)
+                testing_instances.append((cur_x, cur_y))
 
-    for i in range(len(training_instances)):
-        print("Training class " + str(i) + " = " + str(len(training_instances[i])))
-        print("Testing class " + str(i) + " = " + str(len(testing_instances[i])))
-    print('No class = ' + str(len(no_classes_instances)))
-
-    train_data = np.asarray(training_instances[0] + training_instances[1] +
-                            training_instances[2] + training_instances[3])
-    test_data = np.asarray(testing_instances[0] + testing_instances[1] +
-                           testing_instances[2] + testing_instances[3])
-    return train_data, test_data, np.asarray(no_classes_instances)
+    return np.asarray(training_instances), np.asarray(testing_instances), np.asarray(openset_instances)
 
 
 def data_augmentation(img, msk=None, msk_true=None):
@@ -244,7 +203,7 @@ class DataLoader(data.Dataset):
 
 
 class PatchDataLoader(data.Dataset):
-    def __init__(self, mode, images, mask, distr_data, patch_size):
+    def __init__(self, mode, images, mask, distr_data, patch_size, hidden_class, ignore_index=8):
         super().__init__()
 
         self.mode = mode
@@ -252,6 +211,8 @@ class PatchDataLoader(data.Dataset):
         self.mask = mask
         self.distr_data = distr_data
         self.patch_size = patch_size
+        self.hidden_class = hidden_class
+        self.ignore_index = ignore_index
 
         self.num_classes = 4
 
@@ -261,34 +222,34 @@ class PatchDataLoader(data.Dataset):
 
         cur_path = self.images[:, cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size, :]
         cur_mask = self.mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size]
+        print('minmax', np.min(cur_path), np.max(cur_path))
 
-        if self.mode == 'Train':
-            cur_mask[cur_mask >= 4] = 8
-        else:
-            cur_mask = cur_mask - 4
-            cur_mask[cur_mask >= 4] = 8
+        if self.mode == 'Test':
+            # +4 to contrapose the -4 below, in the end, this will be 8 and will be ignored
+            cur_mask[cur_mask == 0] = self.ignore_index + 4
+            cur_mask[cur_mask == 1] = self.ignore_index + 4
+            cur_mask[cur_mask == 2] = self.ignore_index + 4
+            cur_mask[cur_mask == 3] = self.ignore_index + 4
+            cur_mask = cur_mask - 4  # 4,5,6,7 => 0,1,2,3
+        cur_mask[cur_mask == self.hidden_class] = self.ignore_index
+        for i in range(self.hidden_class+1, self.num_classes):
+            cur_mask[cur_mask == i] = i - 1
+        cur_mask[cur_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
 
-        cur_bool_mask = np.copy(cur_mask)
-        cur_bool_mask[cur_bool_mask == 0] = 10  # change class to some value so it can be turned into TRUE
-        cur_bool_mask[cur_bool_mask == 8] = 0  # change class 8 (background/black) to 0 or FALSE
-        cur_bool_mask = np.array(np.array(cur_mask, dtype=bool), dtype=int)
-
+        # sanity check
         assert len(cur_path[0]) == self.patch_size and len(cur_path[0][0]) == self.patch_size, \
             "Wrong patch size " + str(len(cur_path[0])) + " x " + str(len(cur_path[0][0]))
-        # assert cur_mask == 0 or cur_mask == 1 or cur_mask == 2 or cur_mask == 3, \
-        #     "Current class is wrong: " + str(cur_mask)
 
         cur_path = (cur_path / 255) - 0.5
         if self.mode == 'Train':
-            cur_path, cur_mask, cur_bool_mask = data_augmentation(cur_path, cur_mask, cur_bool_mask)
+            cur_path, cur_mask = data_augmentation(cur_path, cur_mask)
         cur_path = np.transpose(cur_path, (0, 3, 1, 2))
 
         # Turning to tensors.
         cur_path = torch.from_numpy(cur_path.copy())
         cur_mask = torch.from_numpy(cur_mask.copy())
-        cur_bool_mask = torch.from_numpy(cur_bool_mask.copy())
 
-        return cur_path.float(), cur_mask.long(), np.array([cur_x, cur_y]), cur_bool_mask
+        return cur_path.float(), cur_mask.long(), np.array([cur_x, cur_y])
 
     def __len__(self):
         return len(self.distr_data)

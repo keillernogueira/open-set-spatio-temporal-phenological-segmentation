@@ -94,13 +94,13 @@ def create_patch_distributions(labels, patch_size, hidden_class, num_classes):
             test_sum = np.sum([x for x in count[4:8] if x != hidden_class+4])
             openset_sum = count[hidden_class] + count[hidden_class+4]
             if openset_sum > 0:
-                print('openset', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
+                # print('openset', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
                 openset_instances.append((cur_x, cur_y))
             elif train_sum > test_sum and train_sum > openset_sum:
-                print('train', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
+                # print('train', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
                 training_instances.append((cur_x, cur_y))
             elif test_sum > 0:
-                print('test', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
+                # print('test', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
                 testing_instances.append((cur_x, cur_y))
 
     return np.asarray(training_instances), np.asarray(testing_instances), np.asarray(openset_instances)
@@ -202,6 +202,7 @@ class DataLoader(data.Dataset):
 class PatchDataLoader(data.Dataset):
     def __init__(self, mode, images, mask, distr_data, patch_size, hidden_class, ignore_index=8):
         super().__init__()
+        assert mode in ['train', 'test', 'open']
 
         self.mode = mode
         self.images = images
@@ -210,10 +211,43 @@ class PatchDataLoader(data.Dataset):
         self.patch_size = patch_size
         self.hidden_class = hidden_class
         self.ignore_index = ignore_index
-
         self.num_classes = 4
 
-    def shift_mask(self, cur_mask):
+        self.train_mask, self.test_mask, self.open_set_mask = self.shift_mask()
+
+    def shift_mask(self):
+        train_mask = np.copy(self.mask)
+        test_mask = np.copy(self.mask)
+        open_set_mask = np.copy(self.mask)
+
+        train_mask[train_mask == self.hidden_class] = self.ignore_index
+        for i in range(self.hidden_class + 1, self.num_classes):
+            train_mask[train_mask == i] = i - 1
+        train_mask[train_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
+
+        # +4 to contrapose the -4 below, in the end, this will be 8 and will be ignored
+        for c in range(self.num_classes):
+            test_mask[test_mask == c] = self.ignore_index + 4
+        test_mask = test_mask - 4  # 4,5,6,7 => 0,1,2,3
+        test_mask[test_mask == self.hidden_class] = self.ignore_index
+        for i in range(self.hidden_class+1, self.num_classes):
+            test_mask[test_mask == i] = i - 1
+        test_mask[test_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
+
+        open_set_mask[open_set_mask == self.hidden_class] = 99  # 99-4 is a flag for unknown
+        open_set_mask[open_set_mask == self.hidden_class + 4] = 99
+        for c in range(self.num_classes):
+            open_set_mask[open_set_mask == c] = self.ignore_index + 4
+        open_set_mask = open_set_mask - 4  # 4,5,6,7 => 0,1,2,3  # only interested in test data
+        for i in range(self.hidden_class + 1, self.num_classes):
+            open_set_mask[open_set_mask == i] = i - 1
+        # open_set_mask[open_set_mask == 99 - 4] = self.num_classes - 1
+        open_set_mask[open_set_mask == 4] = self.ignore_index
+
+        return train_mask, test_mask, open_set_mask
+
+    # @deprecated
+    def shift_patch_mask(self, cur_mask):
         openset_mask = np.copy(cur_mask)
 
         if self.mode == 'test':
@@ -243,9 +277,22 @@ class PatchDataLoader(data.Dataset):
         cur_y = self.distr_data[index][1]
 
         cur_path = self.images[:, cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size, :]
-        cur_mask = np.copy(self.mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
+        if self.mode == 'train':
+            cur_mask = np.copy(self.train_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
+        elif self.mode == 'test':
+            cur_mask = np.copy(self.test_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
+        else:
+            cur_mask = np.copy(self.open_set_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
+            sc = self.mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size]
+            # print('scsc', np.bincount(sc.flatten()))
+            # print('open', np.bincount(cur_mask.flatten()))
 
-        cur_mask, openset_mask = self.shift_mask(cur_mask)
+        # shifting mask on the fly - old, deprecated
+        # print('---------------------------------------------------------')
+        # print('input', np.bincount(cur_mask.flatten()))
+        # cur_mask, openset_mask = self.shift_patch_mask(cur_mask)
+        # print('after', np.bincount(cur_mask.flatten()))
+        # print('opens', np.bincount(openset_mask.flatten()))
 
         # sanity check
         assert len(cur_path[0]) == self.patch_size and len(cur_path[0][0]) == self.patch_size, \
@@ -254,15 +301,14 @@ class PatchDataLoader(data.Dataset):
         # normalization and data augmentation
         cur_path = (cur_path / 255) - 0.5
         if self.mode == 'train':
-            cur_path, cur_mask, openset_mask = data_augmentation(cur_path, cur_mask, openset_mask)
+            cur_path, cur_mask, _ = data_augmentation(cur_path, cur_mask)
         cur_path = np.transpose(cur_path, (0, 3, 1, 2))
 
         # Turning to tensors.
         cur_path = torch.from_numpy(cur_path.copy())
         cur_mask = torch.from_numpy(cur_mask.copy())
-        openset_mask = torch.from_numpy(openset_mask.copy())
 
-        return cur_path.float(), cur_mask.long(), np.array([cur_x, cur_y]), openset_mask.long()
+        return cur_path.float(), cur_mask.long(), np.array([cur_x, cur_y])
 
     def __len__(self):
         return len(self.distr_data)

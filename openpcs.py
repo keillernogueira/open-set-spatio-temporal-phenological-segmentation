@@ -56,8 +56,8 @@ def cov_matrix_identity(features, covariance_matrix):
     return features, np.eye(covariance_matrix.shape[0])
 
 
-def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold, open_pcs_plus=False):
-    scores = np.zeros_like(prds_np, dtype=np.float16)
+def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold=None, open_pcs_plus=False):
+    scores = np.zeros_like(prds_np, dtype=np.float32)
     for c in range(num_classes):
         feat_msk = (prds_np == c)
         if np.any(feat_msk):
@@ -68,8 +68,9 @@ def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold, open_pc
                 feats_pca, cov_matrix = cov_matrix_identity(feats, model_full['cov_matrix'][c])
                 scores[feat_msk] = score_loglike(feats_pca, cov_matrix)
 
-    prds_np[scores < threshold] = num_classes
-    return prds_np, scores
+    # prds_np[scores < threshold] = num_classes
+    # return prds_np, scores
+    return scores
 
 
 def fit_pca_model(feat_np, true_np, prds_np, cl, n_components):
@@ -174,11 +175,9 @@ def train_openset(train_loader, net, n_components=64):
 
 def test_openset(loader, net, model_full, output_path):
     h, w = loader.dataset.mask.shape
-
-    pred_original = np.full((h, w), fill_value=-1, dtype=int)
-    # pred_post = np.full((h, w), fill_value=-1, dtype=np.int)
-    score_pca = np.full((h, w), fill_value=-1, dtype=np.float16)
-    count = 0
+    prob_original = np.zeros((4, h, w), dtype=np.float32)
+    score_open_set = np.zeros((h, w), dtype=np.float32)
+    occur_im = np.zeros((4, h, w), dtype=int)
 
     # Setting network for training mode.
     net.eval()
@@ -186,7 +185,7 @@ def test_openset(loader, net, model_full, output_path):
     # Iterating over batches.
     for i, data in enumerate(loader):
         # Obtaining data and labels
-        inputs, labels, pos, true_labels = data[0], data[1], data[2], data[3]
+        inputs, labels, pos = data[0], data[1], data[2]
 
         # Casting tensors to cuda.
         inputs_c = inputs.cuda()
@@ -202,7 +201,6 @@ def test_openset(loader, net, model_full, output_path):
         soft_outs = F.softmax(outs, dim=1)
         prds = soft_outs.data.max(1)[1]
         preds_numpy = prds.detach().cpu().numpy()
-        print('1', true_labels.shape, preds_numpy.shape)
 
         # Concatenating features
         features = torch.cat([outs.squeeze(), fc1.squeeze(), fc2.squeeze()], 1).detach().cpu().numpy()
@@ -211,40 +209,29 @@ def test_openset(loader, net, model_full, output_path):
             features = np.reshape(features, (-1, features.shape[-1]))
             preds_numpy = preds_numpy.ravel()
         features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
-        print('1', true_labels.shape, preds_numpy.shape, features.shape)
+        print('1', soft_outs.shape, preds_numpy.shape, np.bincount(preds_numpy), features.shape)
 
-        prds_post, scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes-1,
-                                           model_full['thresholds'][15])
-        # print('3', type(scores), type(scores[0]), scores.shape, np.min(scores), np.max(scores),
-        #       type(prds_post), type(prds_post[0]), prds_post.shape, np.min(prds_post), np.max(prds_post),
-        #       preds_numpy.shape, np.min(preds_numpy), np.max(preds_numpy))
+        scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes-1)
+        scores = scores.reshape((-1, loader.dataset.patch_size, loader.dataset.patch_size))
+        print('2', type(scores), type(scores[0]), scores.shape, np.min(scores), np.max(scores))
 
         if type(net) is GRSL:
             for j, p in enumerate(pos):
-                pred_original[p[0], p[1]] = preds_numpy[j]
+                prob_original[p[0], p[1]] = preds_numpy[j]
                 # pred_post[p[0], p[1]] = prds_post[j]
                 score_pca[p[0], p[1]] = scores[j]
         else:
-            preds_numpy = prds.detach().cpu().numpy()
-            # prds_post = np.reshape(prds_post, (-1, loader.dataset.patch_size, loader.dataset.patch_size))
-            scores = np.reshape(scores, (-1, loader.dataset.patch_size, loader.dataset.patch_size))
+            labels[labels <= 4] = 1
+            labels[labels == 95] = 1
+            labels[labels > 4] = 0
+            for j, (cur_x, cur_y) in enumerate(pos):
+                prob_original[1:4, cur_x:cur_x + loader.dataset.patch_size,
+                              cur_y:cur_y + loader.dataset.patch_size] += soft_outs[i, :, :, :] * labels[i]
+                score_open_set[cur_x:cur_x + loader.dataset.patch_size,
+                               cur_y:cur_y + loader.dataset.patch_size] += scores[i, :, :] * labels[i]
+                occur_im[:, cur_x:cur_x + loader.dataset.patch_size, cur_y:cur_y + loader.dataset.patch_size] += 1
 
-            print('3', type(scores), type(scores[0]), scores.shape, np.min(scores), np.max(scores),
-                  type(prds_post), type(prds_post[0]), prds_post.shape, np.min(prds_post), np.max(prds_post),
-                  preds_numpy.shape, np.min(preds_numpy), np.max(preds_numpy))
-
-            for j, p in enumerate(pos):
-                for k in range(loader.dataset.patch_size):
-                    for m in range(loader.dataset.patch_size):
-                        count += 1
-                        pred_original[p[0] + k, p[1] + m] = preds_numpy[j, k, m]
-                        if score_pca[p[0] + k, p[1] + m] != 1:
-                            if score_pca[p[0] + k, p[1] + m] < scores[j, k, m]:
-                                # pred_post[p[0] + k, p[1] + m] = prds_post[j, k, m]
-                                score_pca[p[0] + k, p[1] + m] = scores[j, k, m]
-                        else:
-                            # pred_post[p[0] + k, p[1] + m] = prds_post[j, k, m]
-                            score_pca[p[0] + k, p[1] + m] = scores[j, k, m]
+    # evaluate_tpr(model_full, args.output_path)
 
     print('count', count, pred_original.shape, np.min(pred_original), np.max(pred_original))
     # Saving predictions.

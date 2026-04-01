@@ -252,28 +252,22 @@ if __name__ == '__main__':
     elif args.operation == 'openset':
         assert args.model_path is not None, "For OpenPCS, flag model_path should be set."
 
-        # train
-        if args.network == 'grsl':
-            train_dataset = DataLoader('openset', images, mask, train_data, args.patch_size)
-        else:
-            train_dataset = PatchDataLoader('openset', images, mask, train_data, args.patch_size, args.hidden_class)
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
-                                                       shuffle=False, num_workers=4, drop_last=False)
         model.load_state_dict(torch.load(args.model_path))
         model.cuda()
         if os.path.isfile(os.path.join(args.output_path, args.network + '_model_pca.pkl')):
+            print('loading trained openset model')
             model_full = joblib.load(os.path.join(args.output_path, args.network + '_model_pca.pkl'))
         else:
+            print('training openset')
             model_full = train_openset(train_dataloader, model)
             joblib.dump(model_full, os.path.join(args.output_path, args.network + '_model_pca.pkl'))
 
+        print('thresholds', model_full['thresholds'])
         # test
-        open_dataset = PatchDataLoader('test', images, mask, np.concatenate((test_data, openset_data)),
+        open_dataset = PatchDataLoader('open', images, mask, np.concatenate((test_data, openset_data)),
                                        args.patch_size, args.hidden_class)
         open_dataloader = torch.utils.data.DataLoader(open_dataset, batch_size=args.batch_size,
-                                                      shuffle=False, num_workers=0, drop_last=False)
-
+                                                      shuffle=False, num_workers=4, drop_last=False)
         test_openset(open_dataloader, model, model_full, args.output_path)
-        evaluate_tpr(model_full, args.output_path)
     else:
         raise NotImplementedError("Operation " + args.operation + " not implemented")

@@ -2,11 +2,13 @@ import os
 import numpy as np
 
 from math import log
+import matplotlib.pyplot as plt
 from sklearn import decomposition
 from sklearn.preprocessing import normalize
+from sklearn.metrics import roc_curve, auc, confusion_matrix, ConfusionMatrixDisplay, f1_score
 from scipy.linalg import fractional_matrix_power, pinvh
 
-from utils import convert_pred_image_to_rgb
+from utils import *
 from networks import GRSL
 
 import torch
@@ -61,6 +63,7 @@ def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold=None, op
     for c in range(num_classes):
         feat_msk = (prds_np == c)
         if np.any(feat_msk):
+            # print('feat class', c)
             if open_pcs_plus is False:
                 scores[feat_msk] = model_full['generative'][c].score_samples(feat_np[feat_msk, :])
             else:
@@ -98,7 +101,7 @@ def fit_quantiles(model_list, feat_np, prds_np, num_classes):
     for c in range(num_classes):
         feat_msk = (prds_np == c)
         if np.any(feat_msk):
-            print('feat class', c)
+            # print('feat class', c)
             scores[feat_msk] = model_list[c].score_samples(feat_np[feat_msk, :])
             # print(c, feat_np[feat_msk, :].shape, np.isinf(scores).any(), np.min(scores), np.max(scores))
 
@@ -173,7 +176,7 @@ def train_openset(train_loader, net, n_components=64):
     return {'generative': model_list, 'cov_matrix': conv_matrixes, 'thresholds': scr_thresholds}
 
 
-def test_openset(loader, net, model_full, output_path):
+def test_openset(loader, net, model_full, hidden_class, output_path):
     h, w = loader.dataset.mask.shape
     prob_original = np.zeros((4, h, w), dtype=np.float32)
     score_open_set = np.zeros((h, w), dtype=np.float32)
@@ -209,53 +212,106 @@ def test_openset(loader, net, model_full, output_path):
             features = np.reshape(features, (-1, features.shape[-1]))
             preds_numpy = preds_numpy.ravel()
         features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
-        print('1', soft_outs.shape, preds_numpy.shape, np.bincount(preds_numpy), features.shape)
+        # print('1', soft_outs.shape, preds_numpy.shape, np.bincount(preds_numpy), features.shape)
 
         scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes-1)
-        scores = scores.reshape((-1, loader.dataset.patch_size, loader.dataset.patch_size))
-        print('2', type(scores), type(scores[0]), scores.shape, np.min(scores), np.max(scores))
 
         if type(net) is GRSL:
             for j, p in enumerate(pos):
                 prob_original[p[0], p[1]] = preds_numpy[j]
                 # pred_post[p[0], p[1]] = prds_post[j]
-                score_pca[p[0], p[1]] = scores[j]
+                score_open_set[p[0], p[1]] = scores[j]
         else:
-            labels[labels <= 4] = 1
-            labels[labels == 95] = 1
-            labels[labels > 4] = 0
+            # recreating the entire image from patches
+            scores = scores.reshape((-1, loader.dataset.patch_size, loader.dataset.patch_size))
             for j, (cur_x, cur_y) in enumerate(pos):
                 prob_original[1:4, cur_x:cur_x + loader.dataset.patch_size,
-                              cur_y:cur_y + loader.dataset.patch_size] += soft_outs[i, :, :, :] * labels[i]
+                              cur_y:cur_y + loader.dataset.patch_size] += soft_outs[j, :, :, :].detach().cpu().numpy()
                 score_open_set[cur_x:cur_x + loader.dataset.patch_size,
-                               cur_y:cur_y + loader.dataset.patch_size] += scores[i, :, :] * labels[i]
+                               cur_y:cur_y + loader.dataset.patch_size] += scores[j, :, :]
                 occur_im[:, cur_x:cur_x + loader.dataset.patch_size, cur_y:cur_y + loader.dataset.patch_size] += 1
 
-    # evaluate_tpr(model_full, args.output_path)
+    # calculating the average
+    occur_im[np.where(occur_im == 0)] = 1
+    pred_image = np.argmax(prob_original / occur_im.astype(float), axis=0)
+    score_open_set_norm = score_open_set / occur_im.astype(float)[0, :, :]
 
-    print('count', count, pred_original.shape, np.min(pred_original), np.max(pred_original))
-    # Saving predictions.
-    np.save(os.path.join(output_path, 'prediction_orig.npy'), pred_original)
-    # np.save(os.path.join(output_path, 'prediction_post_tpr_15.npy'), pred_post)
-    np.save(os.path.join(output_path, 'scores.npy'), score_pca)
+    # moving background to correct position and rearranging class so hidden class is empty
+    pred_image[pred_image == 0] = loader.dataset.num_classes
+    for i in range(1, hidden_class+1):
+        pred_image[pred_image == i] = i - 1
+    pred_image[loader.dataset.open_set_mask == 4] = 4  # background
+
+    print('3', pred_image.shape, np.bincount(pred_image.ravel()), 
+          loader.dataset.open_set_mask.shape, np.bincount(loader.dataset.open_set_mask.ravel()),
+          score_open_set_norm.shape, np.min(score_open_set_norm), np.max(score_open_set_norm))
+    # Saving original predictions.
+    imageio.imwrite(os.path.join(output_path, 'prediction_closed_set.png'), lookup_class[pred_image])
+
+    evaluate_openset(model_full['thresholds'], pred_image, score_open_set_norm, loader.dataset.open_set_mask, 
+                     loader.dataset.hidden_class, loader.dataset.num_classes, loader.dataset.open_set_class, output_path)
 
 
-def evaluate_tpr(model_full, output_path):
-    score_pca = np.load(os.path.join(output_path, 'scores.npy'))
-    pred_original = np.load(os.path.join(output_path, 'prediction_orig.npy'))
-
-    thresholds = model_full['thresholds']
+def evaluate_openset(thresholds, current_preds, openset_score, open_set_mask, hidden_class, 
+                     num_classes, open_set_class, output_path, save_images=False):
+    evaluate_roc_auc(open_set_mask, openset_score, num_classes, hidden_class, open_set_class, output_path)
+    
     print('thresholds', thresholds)
-
     quantiles = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
                  0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-
+    
     for i, t in enumerate(thresholds):
-        preds = np.copy(pred_original)
-        unique, counts = np.unique(preds, return_counts=True)
-        print('1', dict(zip(unique, counts)), preds.shape, np.min(preds), np.max(preds))
+        open_set_pred = np.copy(current_preds)
+        open_set_pred[openset_score < t] = open_set_class  # open set
+        open_set_pred[open_set_mask == num_classes] = num_classes  # background
+        
+        print(f'-------------------------------{t}---------------------------------------------')
+        print('openset eval', open_set_mask.shape, np.bincount(open_set_mask.ravel()), 
+              open_set_pred.shape, np.bincount(open_set_pred.ravel()))
+        bacc, bacc_unknown =evaluate_map(open_set_mask, open_set_pred, hidden_class, num_classes, open_set_class=open_set_class)
+        print(f'Average Balanced Accuracy: {(bacc+bacc_unknown)/2:.4f}')
 
-        preds[score_pca < t] = 4
-        unique, counts = np.unique(preds, return_counts=True)
-        print('2', dict(zip(unique, counts)), preds.shape, np.min(preds), np.max(preds))
-        convert_pred_image_to_rgb(preds, os.path.join(output_path, 'prediction_post_tpr_' + str(quantiles[i]) + '.png'))
+        if save_images:
+            imageio.imwrite(os.path.join(output_path, f'prediction_open_set_thrindex_{quantiles[i]}_thrvalue_{t:.4f}.png'), 
+                            lookup_class[open_set_pred])
+
+
+def evaluate_roc_auc(y_true_open, y_score_open, num_classes, hidden_class, open_set_class, output_path):
+    all_labels = None
+    all_openset_scores = None
+    for c in range(num_classes):
+        if c == hidden_class:
+            continue
+        if all_labels is None:
+            all_labels = y_true_open[y_true_open == c]
+            all_openset_scores = y_score_open[y_true_open == c]
+        else:
+            all_labels = np.concatenate((all_labels, y_true_open[y_true_open == c]))
+            all_openset_scores = np.concatenate((all_openset_scores, y_score_open[y_true_open == c]))
+
+    all_labels = np.concatenate((all_labels, y_true_open[y_true_open == open_set_class]))
+    all_openset_scores = np.concatenate((all_openset_scores, y_score_open[y_true_open == open_set_class]))
+    
+    # all_labels[all_labels != open_set_class] = 0  # known classes as negative
+    # all_labels[all_labels == open_set_class] = 1  # open set as positive class
+    all_labels = np.where(all_labels == open_set_class, 0, 1)  # open set as positive class, known classes as negative
+
+    fpr_vals, tpr_vals, roc_thresholds = roc_curve(all_labels, all_openset_scores, pos_label=1)
+    auc_val = auc(fpr_vals, tpr_vals)
+
+    print(f"Open-set ROC AUC: {auc_val:.4f}")
+    print(f"ROC thresholds: {roc_thresholds}")
+
+    #plot the curve
+    plt.figure()
+    plt.plot(fpr_vals, tpr_vals, color='blue', lw=2, label=f'ROC curve (area = {auc_val:.4f})')
+    plt.plot([0, 1], [0, 1], color='red', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC) Curve')
+    plt.legend(loc="lower right")
+    plt.savefig(os.path.join(output_path, 'open_set_roc_curve.png'))
+    plt.close()
+    

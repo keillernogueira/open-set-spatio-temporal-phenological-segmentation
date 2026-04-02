@@ -15,8 +15,11 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 
+import warnings
+warnings.filterwarnings("ignore")
 
-def test(test_loader, net, epoch, ignore_index=8):
+
+def test(test_loader, net, epoch, ignore_index):
     # Setting network for evaluation mode.
     net.eval()
 
@@ -71,7 +74,7 @@ def test(test_loader, net, epoch, ignore_index=8):
     return acc, bacc, conf_m, all_labels, all_preds, all_pos, all_softs
 
 
-def train(train_loader, net, criterion, optimizer, epoch, ignore_index=8):
+def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
     net.train()
     train_loss = list()
     for i, data in enumerate(train_loader):
@@ -160,6 +163,7 @@ if __name__ == '__main__':
     assert args.network == 'grsl' or args.network == 'fcn'
 
     images, mask = load_images(args.dataset_path, args.images, args.patch_size if args.network == 'grsl' else None)
+    num_classes = 4  # hardcoded for now because the same mask image has the train and test
     print(images.shape, mask.shape)
 
     if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy')):
@@ -182,8 +186,8 @@ if __name__ == '__main__':
         train_dataset = DataLoader('train', images, mask, train_data, args.patch_size)
         test_dataset = DataLoader('test', images, mask, test_data, args.patch_size)
     else:
-        train_dataset = PatchDataLoader('train', images, mask, train_data, args.patch_size, args.hidden_class)
-        test_dataset = PatchDataLoader('test', images, mask, test_data, args.patch_size, args.hidden_class)
+        train_dataset = PatchDataLoader('train', images, mask, train_data, args.patch_size, num_classes, args.hidden_class)
+        test_dataset = PatchDataLoader('test', images, mask, test_data, args.patch_size, num_classes, args.hidden_class)
 
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                    shuffle=True, num_workers=4, drop_last=False)
@@ -192,11 +196,11 @@ if __name__ == '__main__':
 
     # network
     if args.network == 'grsl':
-        model = GRSL(len(args.images), 3, train_dataset.num_classes).cuda()
-        criterion = nn.CrossEntropyLoss().cuda()  # ignore class 8
+        model = GRSL(len(args.images), 3, train_dataset.num_classes - 1).cuda()
+        criterion = nn.CrossEntropyLoss().cuda()
     elif args.network == 'fcn':
         model = FCN8s(len(args.images), 3, train_dataset.num_classes - 1).cuda()
-        criterion = nn.CrossEntropyLoss(ignore_index=8).cuda()  # ignore class 8
+        criterion = nn.CrossEntropyLoss(ignore_index=num_classes).cuda()
     else:
         raise NotImplementedError("Network " + args.network + " not implemented")
 
@@ -209,10 +213,10 @@ if __name__ == '__main__':
         best_records = []
         print("Training")
         for epoch in range(curr_epoch, args.epoch_num + 1):
-            train(train_dataloader, model, criterion, optimizer, epoch)
+            train(train_dataloader, model, criterion, optimizer, epoch, ignore_index=num_classes)
 
             # Computing test.
-            acc, bacc, cm, _, _, _, _ = test(test_dataloader, model, epoch)
+            acc, bacc, cm, _, _, _, _ = test(test_dataloader, model, epoch, ignore_index=num_classes)
             save_best_models(model, optimizer, args.output_path, best_records, epoch, acc, bacc, cm, num_saves=1)
 
             scheduler.step()
@@ -223,11 +227,11 @@ if __name__ == '__main__':
         model.cuda()
 
         epoch_num = int(os.path.splitext(os.path.basename(args.model_path))[0].split('_')[-1])
-        _, _, _, all_labels, all_preds, all_pos, all_softs = test(test_dataloader, model, epoch_num)
+        _, _, _, all_labels, all_preds, all_pos, all_softs = test(test_dataloader, model, epoch_num, ignore_index=num_classes)
         # print(np.asarray(all_labels).shape, np.asarray(all_preds).shape,
         #       np.asarray(all_pos).shape, np.asarray(all_softs).shape)
-        all_labels[all_labels <= 4] = 1
-        all_labels[all_labels > 4] = 0
+        all_labels[all_labels < 4] = 1
+        all_labels[all_labels >= 4] = 0
 
         _, h, w, c = test_dataset.images.shape
         prob_image = np.zeros((4, h, w), dtype=np.float32)
@@ -235,11 +239,12 @@ if __name__ == '__main__':
         for i, p in enumerate(all_pos):
             prob_image[1:4, p[0]:p[0]+args.patch_size, p[1]:p[1]+args.patch_size] += all_softs[i, :, :, :] * all_labels[i]
             occur_im[:, p[0]:p[0]+args.patch_size, p[1]:p[1]+args.patch_size] += 1
+        # average image
         occur_im[np.where(occur_im == 0)] = 1
         pred_image = np.argmax(prob_image / occur_im.astype(float), axis=0)
 
-        # print(np.bincount(pred_image.flatten()))
-        pred_image[pred_image == 0] = 4
+        # moving background to correct position and rearranging class so hidden class is empty
+        pred_image[pred_image == 0] = num_classes
         for i in range(1, args.hidden_class+1):
             pred_image[pred_image == i] = i - 1
         # print(np.bincount(pred_image.flatten()))
@@ -248,7 +253,7 @@ if __name__ == '__main__':
         # Saving predictions.
         imageio.imwrite(os.path.join(args.output_path, 'prediction_closed_set_epoch_' + str(epoch_num) + '.png'),
                         color_image)
-        evaluate_map(mask, pred_image, args.hidden_class)
+        evaluate_map(test_dataloader.dataset.test_mask, pred_image, num_classes, args.hidden_class)
     elif args.operation == 'openset':
         assert args.model_path is not None, "For OpenPCS, flag model_path should be set."
 
@@ -265,9 +270,9 @@ if __name__ == '__main__':
         print('thresholds', model_full['thresholds'])
         # test
         open_dataset = PatchDataLoader('open', images, mask, np.concatenate((test_data, openset_data)),
-                                       args.patch_size, args.hidden_class)
+                                       args.patch_size, 4, args.hidden_class)
         open_dataloader = torch.utils.data.DataLoader(open_dataset, batch_size=args.batch_size,
                                                       shuffle=False, num_workers=4, drop_last=False)
-        test_openset(open_dataloader, model, model_full, args.output_path)
+        test_openset(open_dataloader, model, model_full, args.hidden_class, args.output_path)
     else:
         raise NotImplementedError("Operation " + args.operation + " not implemented")

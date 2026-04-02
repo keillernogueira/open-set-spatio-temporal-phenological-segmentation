@@ -200,7 +200,7 @@ class DataLoader(data.Dataset):
 
 
 class PatchDataLoader(data.Dataset):
-    def __init__(self, mode, images, mask, distr_data, patch_size, hidden_class, ignore_index=8):
+    def __init__(self, mode, images, mask, distr_data, patch_size, num_classes, hidden_class):
         super().__init__()
         assert mode in ['train', 'test', 'open']
 
@@ -210,39 +210,46 @@ class PatchDataLoader(data.Dataset):
         self.distr_data = distr_data
         self.patch_size = patch_size
         self.hidden_class = hidden_class
-        self.ignore_index = ignore_index
-        self.num_classes = 4
+
+        self.ignore_index = num_classes
+        self.open_set_class = num_classes + 1
+        self.num_classes = num_classes
 
         self.train_mask, self.test_mask, self.open_set_mask = self.shift_mask()
+        print('original mask', np.bincount(self.mask.flatten()))
+        print('train mask', np.bincount(self.train_mask.flatten()))
+        print('test mask', np.bincount(self.test_mask.flatten()))
+        print('open set mask', np.bincount(self.open_set_mask.flatten()))
 
     def shift_mask(self):
         train_mask = np.copy(self.mask)
         test_mask = np.copy(self.mask)
         open_set_mask = np.copy(self.mask)
 
+        # train mask: 0,1,2,3 => 0,1,2,3 (except hidden class) and 4 => ignore_index
         train_mask[train_mask == self.hidden_class] = self.ignore_index
         for i in range(self.hidden_class + 1, self.num_classes):
             train_mask[train_mask == i] = i - 1
-        train_mask[train_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
+        train_mask[train_mask >= self.num_classes] = self.ignore_index  # "background" and will be ignored during training
 
-        # +4 to contrapose the -4 below, in the end, this will be 8 and will be ignored
+        # test mask: 4,5,6,7 => 0,1,2,3 (except hidden class) and 0,1,2,3 => ignore_index
         for c in range(self.num_classes):
-            test_mask[test_mask == c] = self.ignore_index + 4
+            test_mask[test_mask == c] = 99  # temporary flag to avoid confusion
         test_mask = test_mask - 4  # 4,5,6,7 => 0,1,2,3
         test_mask[test_mask == self.hidden_class] = self.ignore_index
         for i in range(self.hidden_class+1, self.num_classes):
             test_mask[test_mask == i] = i - 1
         test_mask[test_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
 
-        open_set_mask[open_set_mask == self.hidden_class] = 99  # 99-4 is a flag for unknown
-        open_set_mask[open_set_mask == self.hidden_class + 4] = 99
+        # open set mask: 4,5,6,7 => 0,1,2,3 , open set value = self.open_set_class
+        open_set_mask[open_set_mask == self.hidden_class] = self.open_set_class + 4  # because of the -4 below
+        open_set_mask[open_set_mask == self.hidden_class + 4] = self.open_set_class + 4  # because of the -4 below
         for c in range(self.num_classes):
-            open_set_mask[open_set_mask == c] = self.ignore_index + 4
+            open_set_mask[open_set_mask == c] = 99  # temporary flag to avoid confusion
         open_set_mask = open_set_mask - 4  # 4,5,6,7 => 0,1,2,3  # only interested in test data
         for i in range(self.hidden_class + 1, self.num_classes):
             open_set_mask[open_set_mask == i] = i - 1
-        # open_set_mask[open_set_mask == 99 - 4] = self.num_classes - 1
-        open_set_mask[open_set_mask == 4] = self.ignore_index
+        open_set_mask[open_set_mask == 95] = self.ignore_index
 
         return train_mask, test_mask, open_set_mask
 
@@ -283,8 +290,6 @@ class PatchDataLoader(data.Dataset):
             cur_mask = np.copy(self.test_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
         else:
             cur_mask = np.copy(self.open_set_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
-            sc = self.mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size]
-            # print('scsc', np.bincount(sc.flatten()))
             # print('open', np.bincount(cur_mask.flatten()))
 
         # shifting mask on the fly - old, deprecated

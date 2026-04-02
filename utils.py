@@ -2,7 +2,7 @@ import os
 import argparse
 import imageio
 import numpy as np
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix, precision_score, cohen_kappa_score
 
 import torch
 
@@ -30,8 +30,10 @@ cedro = TwoWayDict({0: (0, 255, 255),  # cyan / classes train 0 and test 4
                     1: (0, 255, 0),  # green / classes train 1 and test 5
                     2: (0, 0, 255),  # blue / classes train 2 and test 6
                     3: (255, 0, 0),  # red / classes train 3 and test 7
-                    4: (0, 0, 0)})  # background / class 8
-lookup_class = np.array([cedro[i] for i in range(5)], dtype=np.uint8)
+                    4: (0, 0, 0),  # background / class 8
+                    5: (243,73,211),  # magenta / openset
+                    })  
+lookup_class = np.array([cedro[i] for i in range(6)], dtype=np.uint8)
 
 
 def convert_pred_image_to_rgb(image, output_name):
@@ -88,26 +90,48 @@ def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_
     np.save(os.path.join(output_path, 'best_records.npy'), best_records)
 
 
-def evaluate_map(true_map, pred_map, hidden_class):
+def evaluate_map(true_map, pred_map, hidden_class, num_classes, open_set_class=None):
     all_labels = []
     all_preds = []
-    for c in range(0, 4):
+    for c in range(0, num_classes):
         if c == hidden_class:
             continue
         if all_labels is None:
-            all_labels = true_map[true_map == c + 4] - 4
-            all_preds = pred_map[true_map == c + 4]
+            all_labels = true_map[true_map == c]
+            all_preds = pred_map[true_map == c]
         else:
-            all_labels = np.concatenate((all_labels, true_map[true_map == c + 4] - 4))
-            all_preds = np.concatenate((all_preds, pred_map[true_map == c + 4]))
-    print(np.asarray(all_labels).shape, np.asarray(all_preds).shape,
-          np.bincount(np.asarray(all_labels).astype(int)), np.bincount(np.asarray(all_preds).astype(int)))
+            all_labels = np.concatenate((all_labels, true_map[true_map == c]))
+            all_preds = np.concatenate((all_preds, pred_map[true_map == c]))
+    # print(np.asarray(all_labels).shape, np.asarray(all_preds).shape,
+    #       np.bincount(np.asarray(all_labels).astype(int)), np.bincount(np.asarray(all_preds).astype(int)))
 
     acc = accuracy_score(all_labels, all_preds)
     bacc = balanced_accuracy_score(all_labels, all_preds)
+    prec = precision_score(all_labels, all_preds, average='weighted')
+    cohen_kappa = cohen_kappa_score(all_labels, all_preds)
     conf_m = confusion_matrix(all_labels, all_preds)
 
     print(" Overall Accuracy= " + "{:.4f}".format(acc) +
           " Normalized Accuracy= " + "{:.4f}".format(bacc) +
+          " Precision= " + "{:.4f}".format(prec) +
+          " Cohen's Kappa= " + "{:.4f}".format(cohen_kappa) +
           " Confusion Matrix= " + np.array_str(conf_m).replace("\n", "")
           )
+
+    bacc_unknown = 0
+    if open_set_class is not None:
+        acc_unknown = accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
+        bacc_unknown = balanced_accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
+        prec_unknown = precision_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class], average='weighted')
+        cohen_kappa_unknown = cohen_kappa_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
+        conf_m_unknown = confusion_matrix(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
+
+        print(" Unknown Overall Accuracy= " + "{:.4f}".format(acc_unknown) +
+            " Unknown Normalized Accuracy= " + "{:.4f}".format(bacc_unknown) +
+            " Unknown Precision= " + "{:.4f}".format(prec_unknown) +
+            " Unknown Cohen's Kappa= " + "{:.4f}".format(cohen_kappa_unknown) +
+            " Unknown Confusion Matrix= " + np.array_str(conf_m_unknown).replace("\n", "")
+            )
+        
+    return bacc, bacc_unknown
+

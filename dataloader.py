@@ -27,7 +27,9 @@ def load_images(dataset_path, images, patch_size):
     except IOError:
         raise IOError("Could not open file: " + os.path.join(dataset_path, "mask_train_test_int.png"))
 
-    print(np.bincount(mask.flatten()))
+    # check inf and NaN
+    # print("check inf", np.isinf(mask.flatten()).any())
+    # print("check NaN", np.isnan(mask.flatten()).any())
     return np.asarray(data), np.asarray(mask)
 
 
@@ -60,7 +62,7 @@ def create_distributions(labels, num_classes):
     return train_data, test_data, np.asarray(no_classes_instances)
 
 
-def create_patch_distributions(labels, patch_size, hidden_class, num_classes):
+def create_patch_distributions(labels, patch_size, hidden_class):
     training_instances = []
     testing_instances = []
     openset_instances = []
@@ -230,7 +232,7 @@ class PatchDataLoader(data.Dataset):
         train_mask[train_mask == self.hidden_class] = self.ignore_index
         for i in range(self.hidden_class + 1, self.num_classes):
             train_mask[train_mask == i] = i - 1
-        train_mask[train_mask >= self.num_classes] = self.ignore_index  # "background" and will be ignored during training
+        train_mask[train_mask >= self.num_classes] = self.ignore_index  # "background" will be ignored during training
 
         # test mask: 4,5,6,7 => 0,1,2,3 (except hidden class) and 0,1,2,3 => ignore_index
         for c in range(self.num_classes):
@@ -239,7 +241,7 @@ class PatchDataLoader(data.Dataset):
         test_mask[test_mask == self.hidden_class] = self.ignore_index
         for i in range(self.hidden_class+1, self.num_classes):
             test_mask[test_mask == i] = i - 1
-        test_mask[test_mask >= 4] = self.ignore_index  # class=8 is "background" and will be ignored during training
+        test_mask[test_mask >= 4] = self.ignore_index  # "background" will be ignored during training
 
         # open set mask: 4,5,6,7 => 0,1,2,3 , open set value = self.open_set_class
         open_set_mask[open_set_mask == self.hidden_class] = self.open_set_class + 4  # because of the -4 below
@@ -286,18 +288,14 @@ class PatchDataLoader(data.Dataset):
         cur_path = self.images[:, cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size, :]
         if self.mode == 'train':
             cur_mask = np.copy(self.train_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
+            # print('data validation', np.bincount(cur_mask.flatten()))
         elif self.mode == 'test':
             cur_mask = np.copy(self.test_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
         else:
             cur_mask = np.copy(self.open_set_mask[cur_x:cur_x + self.patch_size, cur_y:cur_y + self.patch_size])
-            # print('open', np.bincount(cur_mask.flatten()))
 
-        # shifting mask on the fly - old, deprecated
-        # print('---------------------------------------------------------')
-        # print('input', np.bincount(cur_mask.flatten()))
+        # shifting mask patch on the fly - old, deprecated
         # cur_mask, openset_mask = self.shift_patch_mask(cur_mask)
-        # print('after', np.bincount(cur_mask.flatten()))
-        # print('opens', np.bincount(openset_mask.flatten()))
 
         # sanity check
         assert len(cur_path[0]) == self.patch_size and len(cur_path[0][0]) == self.patch_size, \

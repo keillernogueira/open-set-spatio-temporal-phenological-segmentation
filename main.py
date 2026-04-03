@@ -95,7 +95,7 @@ def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
 
         # Obtaining predictions.
         prds = soft_outs.cpu().data.numpy().argmax(axis=1)
-        # print(inps.permute(1, 0, 2, 3, 4).shape, labs.shape, prds.shape)
+        # print(inps.permute(1, 0, 2, 3, 4).shape, labels.shape, prds.shape, np.bincount(labels.ravel()), np.bincount(prds.ravel()))
 
         # Computing loss.
         loss = criterion(outs, labs)
@@ -166,19 +166,19 @@ if __name__ == '__main__':
     num_classes = 4  # hardcoded for now because the same mask image has the train and test
     print(images.shape, mask.shape)
 
-    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data.npy')):
-        train_data = np.load(args.network + '_train_data.npy', allow_pickle=True)
-        test_data = np.load(args.network + '_test_data.npy', allow_pickle=True)
-        openset_data = np.load(args.network + '_openset_data.npy', allow_pickle=True)
+    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy')):
+        print('loading saved distributions')
+        train_data = np.load(args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
+        test_data = np.load(args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
+        openset_data = np.load(args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
     else:
         if args.network == 'grsl':
             train_data, test_data, openset_data = create_distributions(mask, 4)
         else:
-            train_data, test_data, openset_data = create_patch_distributions(mask, args.patch_size,
-                                                                             args.hidden_class, num_classes=4)
-        np.save(args.network + '_train_data.npy', train_data)
-        np.save(args.network + '_test_data.npy', test_data)
-        np.save(args.network + '_openset_data.npy', openset_data)
+            train_data, test_data, openset_data = create_patch_distributions(mask, args.patch_size, args.hidden_class)
+        np.save(args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', train_data)
+        np.save(args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', test_data)
+        np.save(args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', openset_data)
     print(train_data.shape, test_data.shape, openset_data.shape)
 
     # data loaders
@@ -244,15 +244,15 @@ if __name__ == '__main__':
         pred_image = np.argmax(prob_image / occur_im.astype(float), axis=0)
 
         # moving background to correct position and rearranging class so hidden class is empty
+        print('before', np.bincount(test_dataloader.dataset.test_mask.ravel()), np.bincount(pred_image.flatten()))
         pred_image[pred_image == 0] = num_classes
-        for i in range(1, args.hidden_class+1):
+        for i in range(1, num_classes):
             pred_image[pred_image == i] = i - 1
-        # print(np.bincount(pred_image.flatten()))
-
-        color_image = lookup_class[pred_image]
+        print('after', np.bincount(test_dataloader.dataset.test_mask.ravel()), np.bincount(pred_image.flatten()))
+        
+        color_image = create_lookup_class(num_classes, hidden_class=args.hidden_class)[pred_image]
         # Saving predictions.
-        imageio.imwrite(os.path.join(args.output_path, 'prediction_closed_set_epoch_' + str(epoch_num) + '.png'),
-                        color_image)
+        imageio.imwrite(os.path.join(args.output_path, 'prediction_closed_set_epoch_' + str(epoch_num) + '.png'), color_image)
         evaluate_map(test_dataloader.dataset.test_mask, pred_image, num_classes, args.hidden_class)
     elif args.operation == 'openset':
         assert args.model_path is not None, "For OpenPCS, flag model_path should be set."

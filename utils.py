@@ -29,11 +29,23 @@ class TwoWayDict(dict):
 cedro = TwoWayDict({0: (0, 255, 255),  # cyan / classes train 0 and test 4
                     1: (0, 255, 0),  # green / classes train 1 and test 5
                     2: (0, 0, 255),  # blue / classes train 2 and test 6
-                    3: (255, 0, 0),  # red / classes train 3 and test 7
+                    3: (243,73,211),  # magenta / classes train 3 and test 7
                     4: (0, 0, 0),  # background / class 8
-                    5: (243,73,211),  # magenta / openset
+                    5: (255, 0, 0),  # red / openset
                     })  
-lookup_class = np.array([cedro[i] for i in range(6)], dtype=np.uint8)
+
+
+def create_lookup_class(num_classes, hidden_class):
+    lookup_class = np.zeros((num_classes+2, 3), dtype=np.uint8)  # +2 for background and openset
+    count = 0
+    for i in range(num_classes):
+        if i == hidden_class:
+            continue
+        lookup_class[count] = cedro[i]
+        count += 1
+    lookup_class[num_classes+1] = (255, 0, 0)  # openset
+    print('lookup class', lookup_class)
+    return lookup_class
 
 
 def convert_pred_image_to_rgb(image, output_name):
@@ -90,12 +102,10 @@ def save_best_models(net, optimizer, output_path, best_records, epoch, acc, acc_
     np.save(os.path.join(output_path, 'best_records.npy'), best_records)
 
 
-def evaluate_map(true_map, pred_map, hidden_class, num_classes, open_set_class=None):
-    all_labels = []
-    all_preds = []
-    for c in range(0, num_classes):
-        if c == hidden_class:
-            continue
+def evaluate_map(true_map, pred_map, num_classes, hidden_class, open_set_class=None):
+    all_labels = None
+    all_preds = None
+    for c in range(num_classes-1):
         if all_labels is None:
             all_labels = true_map[true_map == c]
             all_preds = pred_map[true_map == c]
@@ -120,6 +130,8 @@ def evaluate_map(true_map, pred_map, hidden_class, num_classes, open_set_class=N
 
     bacc_unknown = 0
     if open_set_class is not None:
+        print('Evaluating unknown class', np.bincount(true_map[true_map == open_set_class].ravel()), 
+              np.bincount(pred_map[true_map == open_set_class].ravel()))
         acc_unknown = accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
         bacc_unknown = balanced_accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
         prec_unknown = precision_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class], average='weighted')

@@ -139,6 +139,8 @@ if __name__ == '__main__':
     # general options
     parser.add_argument('--operation', type=str, required=True,
                         help='Operation', choices=['train', 'test', 'openset'])
+    parser.add_argument('--open_set_method', type=str, required=False, default="OpenPCS",
+                        help='Open-set method', choices=['OpenPCS', 'OpenPCS++', 'OpenGMM'])
     parser.add_argument('--output_path', type=str, required=True,
                         help='Path to save outcomes (such as images and trained models) of the algorithm.')
 
@@ -264,7 +266,11 @@ if __name__ == '__main__':
             model_full = joblib.load(os.path.join(args.output_path, args.network + '_model_pca.pkl'))
         else:
             print('training openset')
-            model_full = train_openset(train_dataloader, model)
+            if args.open_set_method == "OpenPCS" or args.open_set_method == "OpenPCS++":
+                n_components = 0.95  # can be int or float for PCA
+            elif args.open_set_method == "OpenGMM":
+                n_components = 16  # number of components for GMM, can be tuned for better results
+            model_full = train_openset(train_dataloader, model, n_components=n_components, open_set_method=args.open_set_method)
             joblib.dump(model_full, os.path.join(args.output_path, args.network + '_model_pca.pkl'))
 
         print('thresholds', model_full['thresholds'])
@@ -273,6 +279,6 @@ if __name__ == '__main__':
                                        args.patch_size, 4, args.hidden_class)
         open_dataloader = torch.utils.data.DataLoader(open_dataset, batch_size=args.batch_size,
                                                       shuffle=False, num_workers=4, drop_last=False)
-        test_openset(open_dataloader, model, model_full, args.hidden_class, args.output_path)
+        test_openset(open_dataloader, model, model_full, args.hidden_class, args.output_path, open_set_method=args.open_set_method)
     else:
         raise NotImplementedError("Operation " + args.operation + " not implemented")

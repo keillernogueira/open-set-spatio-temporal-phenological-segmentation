@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from sklearn import decomposition
 from sklearn.preprocessing import normalize
 from sklearn.metrics import roc_curve, auc, confusion_matrix, ConfusionMatrixDisplay, f1_score
+from sklearn.mixture import GaussianMixture
 from scipy.linalg import fractional_matrix_power, pinvh
 
 from utils import *
@@ -14,6 +15,9 @@ from networks import GRSL
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
+
+quantiles = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
+             0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 
 
 def fast_logdet(matrix):
@@ -54,8 +58,8 @@ def score_loglike(data, covariance_matrix):
 
 
 def cov_matrix_identity(features, covariance_matrix):
-    #features = np.dot(features, fractional_matrix_power(covariance_matrix, -1/2))  # 1x16 * 16x16
-    print(f"cov eigenvalues: {np.linalg.eigvalsh(covariance_matrix)}")  # any near zero?
+    # features = np.dot(features, fractional_matrix_power(covariance_matrix, -1/2))  # 1x16 * 16x16
+    # print(f"cov eigenvalues: {np.linalg.eigvalsh(covariance_matrix)}")  # any near zero?
     
     wp = fractional_matrix_power(covariance_matrix, -1/2)
     print(f"whitening matrix has nan: {np.isnan(wp).any()}")
@@ -64,22 +68,26 @@ def cov_matrix_identity(features, covariance_matrix):
     features = np.dot(features, wp)
     print(f"whitened features has nan: {np.isnan(features).any()}")
     print(f"whitened features has inf: {np.isinf(features).any()}")
-
+    
+    # cov_reg = covariance_matrix + eps * np.eye(covariance_matrix.shape[0])
+    # features = np.dot(features, fractional_matrix_power(cov_reg, -1/2))
+    # return features, np.eye(cov_reg.shape[0])
+    
     return features, np.eye(covariance_matrix.shape[0])
 
 
-def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold=None, openset_method="OpenPCS"):
+def pred_pixelwise(model_full, feat_np, prds_np, num_classes, method="OpenPCS", threshold=None):
     scores = np.zeros_like(prds_np, dtype=np.float32)
     for c in range(num_classes):
         feat_msk = (prds_np == c)
         if np.any(feat_msk):
-            if openset_method == "OpenPCS":
+            if method == "OpenPCS" or method == "OpenGMM":
                 scores[feat_msk] = model_full['generative'][c].score_samples(feat_np[feat_msk, :])
                 # s = model_full['generative'][c].score_samples(feat_np[feat_msk, :])
                 # n_inf = np.isinf(s).sum()
                 # n_nan = np.isnan(s).sum()
                 # print(f"Class {c}: {feat_msk.sum()} samples | -inf: {n_inf} | nan: {n_nan} | min: {np.min(s)} | max: {np.max(s)}")
-            elif openset_method == "OpenPCS++":
+            elif method == "OpenPCS++":
                 feats = model_full['generative'][c].transform(feat_np[feat_msk, :])
                 feats_pca, cov_matrix = cov_matrix_identity(feats, model_full['cov_matrix'][c])
                 scores[feat_msk] = score_loglike(feats_pca, cov_matrix)
@@ -89,9 +97,13 @@ def pred_pixelwise(model_full, feat_np, prds_np, num_classes, threshold=None, op
     return scores
 
 
-def fit_pca_model(feat_np, true_np, prds_np, cl, n_components, limit_samples=False):
+def fit_pca_model(feat_np, true_np, prds_np, cl, n_components, method="OpenPCS", limit_samples=False):
     # model = decomposition.PCA(n_components=n_components, random_state=12345)
-    model = decomposition.PCA(n_components=0.95, svd_solver='full', random_state=12345)
+    if method == "OpenPCS" or method == "OpenPCS++":
+        model = decomposition.PCA(n_components=n_components, svd_solver='full', random_state=12345)
+    else:
+        model = GaussianMixture(n_components=n_components, verbose=2, covariance_type='tied', init_params='random', reg_covar=0.0001, 
+                                random_state=12345)
 
     cl_feat_flat = feat_np[(true_np == cl) & (prds_np == cl), :]
 
@@ -105,8 +117,10 @@ def fit_pca_model(feat_np, true_np, prds_np, cl, n_components, limit_samples=Fal
     # print(f"Any near-zero eigenvalues: {(model.explained_variance_ < 1e-10).any()}")
 
     # OpenPCS++
-    x_pca_train = model.transform(cl_feat_flat)
-    covariance_matrix = np.cov(x_pca_train, rowvar=False)
+    covariance_matrix = None
+    if method == "OpenPCS++":
+        x_pca_train = model.transform(cl_feat_flat)
+        covariance_matrix = np.cov(x_pca_train, rowvar=False)
 
     return model, covariance_matrix
 
@@ -122,14 +136,14 @@ def fit_quantiles(model_list, feat_np, prds_np, num_classes):
             scores[feat_msk] = model_list[c].score_samples(feat_np[feat_msk, :])
             # print(c, feat_np[feat_msk, :].shape, np.isinf(scores).any(), np.min(scores), np.max(scores))
 
-    thresholds = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
-                  0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-    scr_thresholds = np.quantile(scores, thresholds).tolist()
+    # thresholds = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
+    #               0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+    scr_thresholds = np.quantile(scores, quantiles).tolist()
 
     return scr_thresholds
 
 
-def train_openset(train_loader, net, n_components=64):
+def train_openset(train_loader, net, n_components=64, open_set_method="OpenPCS"):
     # Setting network for training mode.
     net.eval()
 
@@ -183,7 +197,7 @@ def train_openset(train_loader, net, n_components=64):
     for c in range(train_loader.dataset.num_classes - 1):
         print('Fitting model for class %d...' % c)
         # Computing PCA models from features.
-        model, conv_matrix = fit_pca_model(feature_list, label_list, pred_list, c, n_components)
+        model, conv_matrix = fit_pca_model(feature_list, label_list, pred_list, c, n_components, method=open_set_method)
         model_list.append(model)
         conv_matrixes.append(conv_matrix)
 
@@ -193,7 +207,7 @@ def train_openset(train_loader, net, n_components=64):
     return {'generative': model_list, 'cov_matrix': conv_matrixes, 'thresholds': scr_thresholds}
 
 
-def test_openset(loader, net, model_full, hidden_class, output_path):
+def test_openset(loader, net, model_full, hidden_class, output_path, open_set_method="OpenPCS"):
     h, w = loader.dataset.mask.shape
     prob_original = np.zeros((4, h, w), dtype=np.float32)
     score_open_set = np.zeros((h, w), dtype=np.float32)
@@ -231,7 +245,7 @@ def test_openset(loader, net, model_full, hidden_class, output_path):
         features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
         # print('1', soft_outs.shape, preds_numpy.shape, np.bincount(preds_numpy), features.shape)
 
-        scores = pred_pixelwise(model_full, features, preds_numpy, loader.dataset.num_classes-1)
+        scores = pred_pixelwise(model_full, features, preds_numpy, num_classes=loader.dataset.num_classes-1, method=open_set_method)
 
         if type(net) is GRSL:
             for j, p in enumerate(pos):
@@ -277,8 +291,6 @@ def evaluate_openset(thresholds, current_preds, openset_score, open_set_mask, hi
     evaluate_roc_auc(open_set_mask, openset_score, num_classes, open_set_class, output_path)
     
     print('thresholds', thresholds)
-    quantiles = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
-                 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
     
     for i, t in enumerate(thresholds):
         open_set_pred = np.copy(current_preds)

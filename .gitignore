@@ -1,4 +1,7 @@
 **.pyc
+.DS_Store
 /.idea
-/predictions
+/outputs/
+/old/
+*.png
 

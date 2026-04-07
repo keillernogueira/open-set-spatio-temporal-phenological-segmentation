@@ -349,3 +349,30 @@ def evaluate_roc_auc(y_true_open, y_score_open, num_classes, open_set_class, out
     plt.savefig(os.path.join(output_path, 'open_set_roc_curve.png'))
     plt.close()
     
+
+# H-score - https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123600562.pdf
+def evaluate_map(y_true, y_pred, num_classes, hidden_class, open_set_class=None):
+    # Exclude background and open set class from evaluation
+    valid_classes = [c for c in range(num_classes) if c != hidden_class and c != open_set_class]
+    
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_true.ravel(), y_pred.ravel(), labels=valid_classes)
+    
+    # Calculate per-class accuracy
+    per_class_acc = np.diag(cm) / np.sum(cm, axis=1)
+    
+    # Calculate balanced accuracy for known classes
+    bacc = np.mean(per_class_acc)
+    
+    # Calculate balanced accuracy for unknown class (if open_set_class is defined)
+    bacc_unknown = None
+    if open_set_class is not None:
+        unknown_mask = (y_true == open_set_class)
+        if np.any(unknown_mask):
+            bacc_unknown = np.mean(y_pred[unknown_mask] == open_set_class)
+
+    print(f'Balanced Accuracy (Known Classes): {bacc:.4f}')
+    if bacc_unknown is not None:
+        print(f'Balanced Accuracy (Unknown Class): {bacc_unknown:.4f}')
+    
+    return bacc, bacc_unknown

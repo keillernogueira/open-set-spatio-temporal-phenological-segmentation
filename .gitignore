@@ -1,7 +1,6 @@
 **.pyc
 .DS_Store
-/.idea
-/outputs/
-/old/
+.idea/
+outputs/
+old/
 *.png
-

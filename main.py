@@ -1,3 +1,5 @@
+
+import os
 import sys
 import datetime
 import joblib
@@ -35,7 +37,7 @@ def test(test_loader, net, epoch, ignore_index):
             inps_c = Variable(inps).cuda()
 
             # Forwarding.
-            outs, _, _ = net(inps_c.permute(1, 0, 2, 3, 4))
+            outs, _, _, _ = net(inps_c.permute(1, 0, 2, 3, 4))
             # Computing probabilities.
             soft_outs = F.softmax(outs, dim=1)
             # Obtaining prior predictions.
@@ -90,7 +92,7 @@ def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
         optimizer.zero_grad()
 
         # Forwarding.
-        outs, _, _ = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
+        outs, _, _, openset_out = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
         soft_outs = F.softmax(outs, dim=1)
 
         # Obtaining predictions.
@@ -98,7 +100,10 @@ def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
         # print(inps.permute(1, 0, 2, 3, 4).shape, labels.shape, prds.shape, np.bincount(labels.ravel()), np.bincount(prds.ravel()))
 
         # Computing loss.
-        loss = criterion(outs, labs)
+        if isinstance(criterion, OpenSetLoss):
+            loss = criterion(outs, openset_out, labs)
+        else:
+            loss = criterion(outs, labs)
 
         # Computing backpropagation.
         loss.backward()
@@ -108,7 +113,7 @@ def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
         train_loss.append(loss.data.item())
 
         # Printing.
-        if i > 0 and i % 5 == 0:
+        if i > 0 and i % 3 == 0:
             if type(net) is not GRSL:  # not pixelwise
                 labels = labels.numpy().flatten()
                 prds = prds.flatten()
@@ -140,16 +145,16 @@ if __name__ == '__main__':
     parser.add_argument('--operation', type=str, required=True,
                         help='Operation', choices=['train', 'test', 'openset'])
     parser.add_argument('--open_set_method', type=str, required=False, default="OpenPCS",
-                        help='Open-set method', choices=['OpenPCS', 'OpenPCS++', 'OpenGMM'])
+                        help='Open-set method', choices=['OpenPCS', 'OpenPCS++', 'OpenGMM', 'OpenLoss'])
     parser.add_argument('--output_path', type=str, required=True,
                         help='Path to save outcomes (such as images and trained models) of the algorithm.')
 
     # dataset options
     parser.add_argument('--dataset_path', type=str, required=True, help='Dataset path.')
-    parser.add_argument('--images', type=str, nargs="+", required=True, help='Image/timestamp names.')
+    parser.add_argument('--images', type=str, nargs="+", required=False, default=None, help='Image/timestamp names.')
     parser.add_argument('--patch_size', type=int, required=False, default=25, help='Patch size.')
     parser.add_argument('--hidden_class', type=int, required=True,
-                        help='Hidden class for open-set. Values from 0 to 3.')
+                        help='Hidden class for open-set. Values from 0 to num_classes-1.')
 
     # model options
     parser.add_argument('--network', type=str, required=True,
@@ -164,23 +169,39 @@ if __name__ == '__main__':
     print(args)
     assert args.network == 'grsl' or args.network == 'fcn'
 
-    images, mask = load_images(args.dataset_path, args.images, args.patch_size if args.network == 'grsl' else None)
-    num_classes = 4  # hardcoded for now because the same mask image has the train and test
+    if args.images is not None:
+        # serra do cipo dataset
+        dataset_name = "serracipo"
+        images_list = [s + ".tif" for s in args.images]
+        images, mask = load_images(args.dataset_path, images_list, args.patch_size if args.network == 'grsl' else None)
+        num_classes = 4  # hardcoded for now because the same mask image has the train and test
+    else:
+        # itirapina dataset
+        dataset_name = "itirapina"
+        base_path = os.path.join(args.dataset_path, 'images', '1')
+        image_list = [os.path.join('images', '1', f) for f in sorted(os.listdir(base_path))]
+        images, mask = load_images(args.dataset_path, image_list, 
+                                   args.patch_size if args.network == 'grsl' else None, 
+                                   "whole_mask_int_itirapina_v2_background_swapped.png")
+        images = images.reshape(33, 13, 960, 1280, 3).transpose(0, 2, 3, 1, 4)
+        images = images.reshape(33, 960, 1280, 13 * 3)
+        num_classes = 6  # hardcoded for now because the same mask image has the train and test
     print(images.shape, mask.shape)
 
-    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy')):
+    if os.path.isfile(os.path.join(os.path.abspath(os.getcwd()), 
+                                   dataset_name + '_' + args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy')):
         print('loading saved distributions')
-        train_data = np.load(args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
-        test_data = np.load(args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
-        openset_data = np.load(args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
+        train_data = np.load(dataset_name + '_' + args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
+        test_data = np.load(dataset_name + '_' + args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
+        openset_data = np.load(dataset_name + '_' + args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', allow_pickle=True)
     else:
         if args.network == 'grsl':
-            train_data, test_data, openset_data = create_distributions(mask, 4)
+            train_data, test_data, openset_data = create_distributions(mask, num_classes)
         else:
-            train_data, test_data, openset_data = create_patch_distributions(mask, args.patch_size, args.hidden_class)
-        np.save(args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', train_data)
-        np.save(args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', test_data)
-        np.save(args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', openset_data)
+            train_data, test_data, openset_data = create_patch_distributions(mask, args.patch_size, args.hidden_class, num_classes)
+        np.save(dataset_name + '_' + args.network + '_train_data_hidden_' + str(args.hidden_class) + '.npy', train_data)
+        np.save(dataset_name + '_' + args.network + '_test_data_hidden_' + str(args.hidden_class) + '.npy', test_data)
+        np.save(dataset_name + '_' + args.network + '_openset_data_hidden_' + str(args.hidden_class) + '.npy', openset_data)
     print(train_data.shape, test_data.shape, openset_data.shape)
 
     # data loaders
@@ -201,14 +222,18 @@ if __name__ == '__main__':
         model = GRSL(len(args.images), 3, train_dataset.num_classes - 1).cuda()
         criterion = nn.CrossEntropyLoss().cuda()
     elif args.network == 'fcn':
-        model = FCN8s(len(args.images), 3, train_dataset.num_classes - 1).cuda()
-        criterion = nn.CrossEntropyLoss(ignore_index=num_classes).cuda()
+        model = FCN8s(len(images), images.shape[-1], train_dataset.num_classes - 1, 
+                      open_head=True if args.open_set_method == 'OpenLoss' else False).cuda()
+        if args.open_set_method == 'OpenLoss':
+            criterion = OpenSetLoss(num_classes - 1, ignore_index=num_classes).cuda()
+        else:
+            criterion = nn.CrossEntropyLoss(ignore_index=num_classes).cuda()
     else:
         raise NotImplementedError("Network " + args.network + " not implemented")
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
                            betas=(0.9, 0.99))
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     if args.operation == 'train':
         curr_epoch = 1
@@ -261,19 +286,20 @@ if __name__ == '__main__':
 
         model.load_state_dict(torch.load(args.model_path))
         model.cuda()
-        if os.path.isfile(os.path.join(args.output_path, args.network + '_model_pca.pkl')):
-            print('loading trained openset model')
-            model_full = joblib.load(os.path.join(args.output_path, args.network + '_model_pca.pkl'))
-        else:
-            print('training openset')
-            if args.open_set_method == "OpenPCS" or args.open_set_method == "OpenPCS++":
-                n_components = 0.95  # can be int or float for PCA
-            elif args.open_set_method == "OpenGMM":
-                n_components = 16  # number of components for GMM, can be tuned for better results
-            model_full = train_openset(train_dataloader, model, n_components=n_components, open_set_method=args.open_set_method)
-            joblib.dump(model_full, os.path.join(args.output_path, args.network + '_model_pca.pkl'))
+        model_full = None
+        if args.open_set_method != "OpenLoss":
+            if os.path.isfile(os.path.join(args.output_path, args.network + '_model_pca.pkl')):
+                print('loading trained openset model')
+                model_full = joblib.load(os.path.join(args.output_path, args.network + '_model_pca.pkl'))
+            else:
+                print('training openset')
+                if args.open_set_method == "OpenPCS" or args.open_set_method == "OpenPCS++":
+                    n_components = 0.95  # can be int or float for PCA
+                elif args.open_set_method == "OpenGMM":
+                    n_components = 16  # number of components for GMM, can be tuned for better results
+                model_full = train_openset(train_dataloader, model, n_components=n_components, open_set_method=args.open_set_method)
+                joblib.dump(model_full, os.path.join(args.output_path, args.network + '_model_pca.pkl'))
 
-        print('thresholds', model_full['thresholds'])
         # test
         open_dataset = PatchDataLoader('open', images, mask, np.concatenate((test_data, openset_data)),
                                        args.patch_size, 4, args.hidden_class)

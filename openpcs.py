@@ -13,6 +13,7 @@ from utils import *
 from networks import GRSL
 
 import torch
+import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 
@@ -162,7 +163,7 @@ def train_openset(train_loader, net, n_components=64, open_set_method="OpenPCS")
         labs = Variable(labels_c).cuda()
 
         # Forwarding.
-        outs, fc1, fc2 = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
+        outs, fc1, fc2, openset_out = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
         # Computing loss.
         soft_outs = F.softmax(outs, dim=1)
         # Obtaining predictions.
@@ -219,7 +220,7 @@ def test_openset(loader, net, model_full, hidden_class, output_path, open_set_me
     # Iterating over batches.
     for i, data in enumerate(loader):
         # Obtaining data and labels
-        inputs, labels, pos = data[0], data[1], data[2]
+        inputs, pos = data[0], data[2]
 
         # Casting tensors to cuda.
         inputs_c = inputs.cuda()
@@ -228,24 +229,31 @@ def test_openset(loader, net, model_full, hidden_class, output_path, open_set_me
         inps = Variable(inputs_c).cuda()
 
         # Forwarding.
-        outs, fc1, fc2 = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
-        # print(outs.shape, fc1.shape, fc2.shape)
+        outs, fc1, fc2, openset_out = net(inps.permute(1, 0, 2, 3, 4))  # permute to change the branches with the batch size
+        # print(outs.shape, fc1.shape, fc2.shape, openset_out.shape)
 
         # Obtaining predictions.
         soft_outs = F.softmax(outs, dim=1)
         prds = soft_outs.data.max(1)[1]
         preds_numpy = prds.detach().cpu().numpy()
 
-        # Concatenating features
-        features = torch.cat([outs.squeeze(), fc1.squeeze(), fc2.squeeze()], 1).detach().cpu().numpy()
-        if type(net) is not GRSL:
-            features = np.transpose(features, (0, 2, 3, 1))
-            features = np.reshape(features, (-1, features.shape[-1]))
-            preds_numpy = preds_numpy.ravel()
-        features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
-        # print('1', soft_outs.shape, preds_numpy.shape, np.bincount(preds_numpy), features.shape)
-
-        scores = pred_pixelwise(model_full, features, preds_numpy, num_classes=loader.dataset.num_classes-1, method=open_set_method)
+        if open_set_method in ["OpenPCS", "OpenGMM", "OpenPCS++"]:
+            # Concatenating features
+            features = torch.cat([outs.squeeze(), fc1.squeeze(), fc2.squeeze()], 1).detach().cpu().numpy()
+            if type(net) is not GRSL:  # GRSL is pixelwise - not used anymore
+                features = np.transpose(features, (0, 2, 3, 1))
+                features = np.reshape(features, (-1, features.shape[-1]))
+                preds_numpy = preds_numpy.ravel()
+            features = normalize(np.asarray(features), norm='l2', axis=1, copy=False)
+            
+            scores = pred_pixelwise(model_full, features, preds_numpy, num_classes=loader.dataset.num_classes-1, method=open_set_method)
+        else:
+            # OpenLoss
+            b, _, h, w = outs.shape
+            oset_prob = F.softmax(openset_out, dim=1)
+            preds_reshaped = prds.view(b, 1, 1, h, w).expand(b, 2, 1, h, w)
+            scores = torch.gather(oset_prob, dim=2, index=preds_reshaped)[:, 1, 0, :, :].detach().cpu().numpy()
+            # print("scores", type(scores), scores.shape, np.min(scores), np.max(scores), np.mean(scores))
 
         if type(net) is GRSL:
             for j, p in enumerate(pos):
@@ -276,13 +284,22 @@ def test_openset(loader, net, model_full, hidden_class, output_path, open_set_me
 
     print('open set all', pred_image.shape, np.bincount(pred_image.ravel()), 
           loader.dataset.open_set_mask.shape, np.bincount(loader.dataset.open_set_mask.ravel()),
-          score_open_set_norm.shape, np.min(score_open_set_norm), np.max(score_open_set_norm))
+          score_open_set_norm.shape, np.min(score_open_set_norm), np.max(score_open_set_norm), np.mean(score_open_set_norm))
 
     # Saving original predictions.
     imageio.imwrite(os.path.join(output_path, 'prediction_closed_set.png'), 
                     create_lookup_class(loader.dataset.num_classes, hidden_class=hidden_class)[pred_image])
 
-    evaluate_openset(model_full['thresholds'], pred_image, score_open_set_norm, loader.dataset.open_set_mask, 
+    if open_set_method in ["OpenPCS", "OpenGMM", "OpenPCS++"]:
+        thresholds = model_full['thresholds']
+    else:
+        limit = np.mean(score_open_set_norm) + (3 * np.std(score_open_set_norm))
+        print(np.min(score_open_set_norm), np.max(score_open_set_norm), np.mean(score_open_set_norm), limit, limit/20)
+        thresholds = np.arange(-limit, 0, limit/20)
+        # for OpenLoss, higher score means more likely to be open set, so we negate it to be consistent with other methods where higher score means more likely to be closed set
+        score_open_set_norm = -score_open_set_norm
+
+    evaluate_openset(thresholds, pred_image, score_open_set_norm, loader.dataset.open_set_mask, 
                      loader.dataset.hidden_class, loader.dataset.num_classes, loader.dataset.open_set_class, output_path)
 
 
@@ -302,7 +319,8 @@ def evaluate_openset(thresholds, current_preds, openset_score, open_set_mask, hi
               open_set_mask.shape, np.bincount(open_set_mask.ravel()),
               open_set_pred.shape, np.bincount(open_set_pred.ravel()))
         bacc, bacc_unknown = evaluate_map(open_set_mask, open_set_pred, num_classes, hidden_class, open_set_class=open_set_class)
-        print(f'Average Balanced Accuracy: {(3*bacc+bacc_unknown)/4:.4f}')
+        # H-score - https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123600562.pdf
+        print(f'H-Score: {2*((bacc*bacc_unknown)/(bacc+bacc_unknown)):.4f}')
 
         if save_images:
             imageio.imwrite(os.path.join(output_path, f'prediction_open_set_thrindex_{quantiles[i]}_thrvalue_{t:.4f}.png'), 
@@ -350,29 +368,51 @@ def evaluate_roc_auc(y_true_open, y_score_open, num_classes, open_set_class, out
     plt.close()
     
 
-# H-score - https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123600562.pdf
-def evaluate_map(y_true, y_pred, num_classes, hidden_class, open_set_class=None):
-    # Exclude background and open set class from evaluation
-    valid_classes = [c for c in range(num_classes) if c != hidden_class and c != open_set_class]
-    
-    # Calculate confusion matrix
-    cm = confusion_matrix(y_true.ravel(), y_pred.ravel(), labels=valid_classes)
-    
-    # Calculate per-class accuracy
-    per_class_acc = np.diag(cm) / np.sum(cm, axis=1)
-    
-    # Calculate balanced accuracy for known classes
-    bacc = np.mean(per_class_acc)
-    
-    # Calculate balanced accuracy for unknown class (if open_set_class is defined)
-    bacc_unknown = None
-    if open_set_class is not None:
-        unknown_mask = (y_true == open_set_class)
-        if np.any(unknown_mask):
-            bacc_unknown = np.mean(y_pred[unknown_mask] == open_set_class)
+class OpenSetLoss(nn.Module):
+    def __init__(self, num_classes, ignore_index=None, loss_weights={"source_cset": 1.0, "source_oset": 0.5}):
+        super().__init__()
+        self.loss_weights = loss_weights
+        self.ignore_index = ignore_index
+        self.num_classes = num_classes
 
-    print(f'Balanced Accuracy (Known Classes): {bacc:.4f}')
-    if bacc_unknown is not None:
-        print(f'Balanced Accuracy (Unknown Class): {bacc_unknown:.4f}')
-    
-    return bacc, bacc_unknown
+    def forward(self, logits, openset_logits, y):
+        # cross entropy over closed set classes
+        # print('loss inputs', logits.shape, openset_logits.shape, y.shape)
+        
+        cset_loss = F.cross_entropy(logits, y, ignore_index=self.ignore_index)
+
+        # dealing with unknown class with open set head
+        oset_prob = F.softmax(openset_logits, dim=1)
+
+        # print(torch.bincount(y.ravel()), self.ignore_index)
+        valid_mask = (y != self.ignore_index)  # shape same as labels
+        oset_pos_target = F.one_hot(y * valid_mask, num_classes=self.num_classes)
+        oset_pos_target = oset_pos_target.permute(0, 3, 1, 2).float()
+        oset_neg_target = 1 - oset_pos_target
+        # print('oset targets', oset_pos_target.shape, oset_neg_target.shape)
+        
+        # creating mask to ignore background pixels in the loss calculation
+        valid_mask_exp = valid_mask.unsqueeze(1)
+        oset_pos_target_m = oset_pos_target * valid_mask_exp
+        oset_neg_target_m = oset_neg_target * valid_mask_exp
+        oset_prob_m = oset_prob * valid_mask_exp.unsqueeze(1)
+        # print('masked oset targets and prob', oset_pos_target_m.shape, oset_neg_target_m.shape, oset_prob_m.shape)
+        
+        oset_pos_loss = torch.sum(-oset_pos_target_m * torch.log(oset_prob_m[:, 0, :, :, :] + 1e-8), dim=[1, 2, 3])
+        # print('oset pos loss', oset_pos_loss.shape)
+        oset_neg_loss = torch.max((-oset_neg_target_m * torch.log(oset_prob_m[:, 1, :, :, :] + 1e-8)).reshape(logits.size(0), -1), dim=1)[0]
+        # print('oset neg loss', oset_neg_loss.shape)
+
+        n_valid = valid_mask.sum(dim=[1, 2]).clamp(min=1)  # (batch,) - clamp = avoid div by zero
+
+        oset_pos_loss = (oset_pos_loss / n_valid).mean()
+        oset_neg_loss = oset_neg_loss.mean()
+
+        oset_loss = oset_pos_loss + oset_neg_loss
+
+        loss = (
+            cset_loss * self.loss_weights["source_cset"]
+            + oset_loss * self.loss_weights["source_oset"]
+        )
+        
+        return loss

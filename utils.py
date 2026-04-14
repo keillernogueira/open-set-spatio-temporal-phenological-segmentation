@@ -3,6 +3,7 @@ import argparse
 import imageio
 import numpy as np
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix, precision_score, cohen_kappa_score
+from collections import defaultdict
 
 import torch
 
@@ -44,7 +45,7 @@ def create_lookup_class(num_classes, hidden_class):
         lookup_class[count] = cedro[i]
         count += 1
     lookup_class[num_classes+1] = (255, 0, 0)  # openset
-    print('lookup class', lookup_class)
+    # print('lookup class', lookup_class)
     return lookup_class
 
 
@@ -132,11 +133,19 @@ def evaluate_map(true_map, pred_map, num_classes, hidden_class, open_set_class=N
     if open_set_class is not None:
         print('Evaluating unknown class', np.bincount(true_map[true_map == open_set_class].ravel()), 
               np.bincount(pred_map[true_map == open_set_class].ravel()))
-        acc_unknown = accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
-        bacc_unknown = balanced_accuracy_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
-        prec_unknown = precision_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class], average='weighted')
-        cohen_kappa_unknown = cohen_kappa_score(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
-        conf_m_unknown = confusion_matrix(true_map[true_map == open_set_class], pred_map[true_map == open_set_class])
+        bg_mask = true_map != num_classes  # background mask
+        true_map_clean = true_map[bg_mask]
+        pred_map_clean = pred_map[bg_mask]
+
+        # create a binary mask for the open set class
+        y_true_bin = (true_map_clean == open_set_class).astype(int)
+        y_pred_bin = (pred_map_clean == open_set_class).astype(int)
+
+        acc_unknown = accuracy_score(y_true_bin, y_pred_bin)
+        bacc_unknown  = balanced_accuracy_score(y_true_bin, y_pred_bin)
+        prec_unknown  = precision_score(y_true_bin, y_pred_bin, zero_division=0)
+        cohen_kappa_unknown = cohen_kappa_score(y_true_bin, y_pred_bin)
+        conf_m_unknown = confusion_matrix(y_true_bin, y_pred_bin)
 
         print(" Unknown Overall Accuracy= " + "{:.4f}".format(acc_unknown) +
             " Unknown Normalized Accuracy= " + "{:.4f}".format(bacc_unknown) +
@@ -147,3 +156,30 @@ def evaluate_map(true_map, pred_map, num_classes, hidden_class, open_set_class=N
         
     return bacc, bacc_unknown
 
+
+def manipulate_itirapina_mask(mask):
+    print(mask.shape, np.bincount(mask.ravel()))
+    mask[mask == 0] = 13
+    mask = mask - 1
+    print(mask.shape, np.bincount(mask.ravel()))
+    imageio.imwrite("/Users/keillernogueira/Downloads/whole_mask_int_itirapina_v2_background_swapped.png", mask)
+
+
+def check_itirapina_dataset(path):
+    all_files = sorted(os.listdir(path))
+    print(all_files)
+    d = defaultdict(list)
+    for f in all_files:
+        _, day, hour = f[:-4].split("_")
+        d[day].append(int(hour))
+    # sort dict based on key
+    d = dict(sorted(d.items()))
+    print(d)
+    for day, hours in d.items():
+        if len(hours) != 13:
+            print(day, sorted(hours), len(hours))
+
+if __name__ == '__main__':
+    # mask = imageio.v2.imread("/Users/keillernogueira/Downloads/whole_mask_int_itirapina_v2.png")
+    # manipulate_itirapina_mask(mask)
+    check_itirapina_dataset("/Users/keillernogueira/Downloads/images/1/")

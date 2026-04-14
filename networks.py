@@ -77,7 +77,7 @@ class GRSL(nn.Module):
 
 
 class FCN8s(nn.Module):
-    def __init__(self, num_branches, input_channels, num_classes):
+    def __init__(self, num_branches, input_channels, num_classes, open_head=False):
         super(FCN8s, self).__init__()
 
         # branches
@@ -157,8 +157,12 @@ class FCN8s(nn.Module):
         self.score_pool4 = nn.Conv2d(256, num_classes, 1)
 
         self.upscore2 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2, bias=False)
-        self.upscore8 = nn.ConvTranspose2d(num_classes, num_classes, 10, stride=5, bias=False)
+        self.upscore8 = nn.ConvTranspose2d(num_classes, num_classes, 10, stride=5, bias=False)  # final score
         self.upscore_pool4 = nn.ConvTranspose2d(num_classes, num_classes, 2, stride=2, bias=False)
+        
+        self.openset_head = None
+        if open_head:
+            self.openset_head = nn.ConvTranspose2d(num_classes, num_classes * 2, 10, stride=5, bias=False)
 
         initialize_weights()
 
@@ -200,6 +204,10 @@ class FCN8s(nn.Module):
         concat2 = upscore_pool4 + score_pool3  # 1/8
         out = self.upscore8(concat2)
         # h = h[:, :, 31:31 + x.size()[2], 31:31 + x.size()[3]].contiguous()
+        
+        openset_out = None
+        if self.openset_head is not None:
+            openset_out = self.openset_head(concat2).view(out.size(0), 2, -1, out.size(2), out.size(3))
 
         return out, F.interpolate(conv5_out, x.size()[3:], mode='bilinear'), \
-               F.interpolate(conv2_out, x.size()[3:], mode='bilinear')
+               F.interpolate(conv2_out, x.size()[3:], mode='bilinear'), openset_out

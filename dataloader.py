@@ -6,12 +6,14 @@ import torch
 from torch.utils import data
 
 
-def load_images(dataset_path, images, patch_size):
+def load_images(dataset_path, images, patch_size, mask_name="mask_train_test_int.png"):
     data = []
 
     for name in images:
+        if 'itirapina' in mask_name and int(os.path.basename(name).split("_")[1]) in [251, 255, 276, 278]:
+            continue
         try:
-            img = imageio.v2.imread(os.path.join(dataset_path, name + '.tif'))
+            img = imageio.v2.imread(os.path.join(dataset_path, name))
             print(name, img.shape)
             # img_as_float(imageio.imread(os.path.join(dataset_path, name)))
         except IOError:
@@ -23,9 +25,9 @@ def load_images(dataset_path, images, patch_size):
         else:
             data.append(img)
     try:
-        mask = imageio.v2.imread(os.path.join(dataset_path, "mask_train_test_int.png"))
+        mask = imageio.v2.imread(os.path.join(dataset_path, mask_name))
     except IOError:
-        raise IOError("Could not open file: " + os.path.join(dataset_path, "mask_train_test_int.png"))
+        raise IOError("Could not open file: " + os.path.join(dataset_path, mask_name))
 
     # check inf and NaN
     # print("check inf", np.isinf(mask.flatten()).any())
@@ -42,11 +44,11 @@ def create_distributions(labels, num_classes):
 
     for i in range(0, w):
         for j in range(0, h):
-            if labels[i, j] != 8:
-                if labels[i, j] == 0 or labels[i, j] == 1 or labels[i, j] == 2 or labels[i, j] == 3:
+            if labels[i, j] != num_classes * 2:  # *2 because of the train/test split, e.g., 0,1,2,3 for train and 4,5,6,7 for test
+                if labels[i, j] < num_classes:
                     training_instances[labels[i, j]].append((i, j))
                 else:
-                    testing_instances[labels[i, j] - 4].append((i, j))
+                    testing_instances[labels[i, j] - num_classes].append((i, j))
             else:
                 no_classes_instances.append((i, j))
 
@@ -55,14 +57,12 @@ def create_distributions(labels, num_classes):
         print("Testing class " + str(i) + " = " + str(len(testing_instances[i])))
     print('No class = ' + str(len(no_classes_instances)))
 
-    train_data = np.asarray(training_instances[0] + training_instances[1] +
-                            training_instances[2] + training_instances[3])
-    test_data = np.asarray(testing_instances[0] + testing_instances[1] +
-                           testing_instances[2] + testing_instances[3])
+    train_data = np.asarray(sum(training_instances, []))
+    test_data = np.asarray(sum(testing_instances, []))
     return train_data, test_data, np.asarray(no_classes_instances)
 
 
-def create_patch_distributions(labels, patch_size, hidden_class):
+def create_patch_distributions(labels, patch_size, hidden_class, num_classes):
     training_instances = []
     testing_instances = []
     openset_instances = []
@@ -92,9 +92,9 @@ def create_patch_distributions(labels, patch_size, hidden_class):
                                                                   "x" + str(len(patch_class[0]))
 
             count = np.bincount(patch_class.astype(int).flatten(), minlength=9)
-            train_sum = np.sum([x for x in count[0:4] if x != hidden_class])
-            test_sum = np.sum([x for x in count[4:8] if x != hidden_class+4])
-            openset_sum = count[hidden_class] + count[hidden_class+4]
+            train_sum = np.sum([x for x in count[0:num_classes] if x != hidden_class])
+            test_sum = np.sum([x for x in count[num_classes:2*num_classes] if x != hidden_class+num_classes])
+            openset_sum = count[hidden_class] + count[hidden_class+num_classes]
             if openset_sum > 0:
                 # print('openset', count, hidden_class, train_sum, test_sum, openset_sum, cur_x, cur_y)
                 openset_instances.append((cur_x, cur_y))
@@ -154,6 +154,7 @@ def data_augmentation(img, msk=None, msk_true=None):
     return img, msk, msk_true
 
 
+# Serra do Cipo dataset
 class DataLoader(data.Dataset):
     def __init__(self, mode, images, mask, distr_data, patch_size):
         super().__init__()
@@ -201,6 +202,7 @@ class DataLoader(data.Dataset):
         return len(self.distr_data)
 
 
+# Serra do Cipo dataset
 class PatchDataLoader(data.Dataset):
     def __init__(self, mode, images, mask, distr_data, patch_size, num_classes, hidden_class):
         super().__init__()
@@ -237,21 +239,21 @@ class PatchDataLoader(data.Dataset):
         # test mask: 4,5,6,7 => 0,1,2,3 (except hidden class) and 0,1,2,3 => ignore_index
         for c in range(self.num_classes):
             test_mask[test_mask == c] = 99  # temporary flag to avoid confusion
-        test_mask = test_mask - 4  # 4,5,6,7 => 0,1,2,3
+        test_mask = test_mask - self.num_classes  # 4,5,6,7 => 0,1,2,3
         test_mask[test_mask == self.hidden_class] = self.ignore_index
         for i in range(self.hidden_class+1, self.num_classes):
             test_mask[test_mask == i] = i - 1
-        test_mask[test_mask >= 4] = self.ignore_index  # "background" will be ignored during training
+        test_mask[test_mask >= self.num_classes] = self.ignore_index  # "background" will be ignored during training
 
         # open set mask: 4,5,6,7 => 0,1,2,3 , open set value = self.open_set_class
-        open_set_mask[open_set_mask == self.hidden_class] = self.open_set_class + 4  # because of the -4 below
-        open_set_mask[open_set_mask == self.hidden_class + 4] = self.open_set_class + 4  # because of the -4 below
+        open_set_mask[open_set_mask == self.hidden_class] = self.open_set_class + self.num_classes  # because of the -4 below
+        open_set_mask[open_set_mask == self.hidden_class + self.num_classes] = self.open_set_class + self.num_classes  # because of the -4 below
         for c in range(self.num_classes):
             open_set_mask[open_set_mask == c] = 99  # temporary flag to avoid confusion
-        open_set_mask = open_set_mask - 4  # 4,5,6,7 => 0,1,2,3  # only interested in test data
+        open_set_mask = open_set_mask - self.num_classes  # 4,5,6,7 => 0,1,2,3  # only interested in test data
         for i in range(self.hidden_class + 1, self.num_classes):
             open_set_mask[open_set_mask == i] = i - 1
-        open_set_mask[open_set_mask == 95] = self.ignore_index
+        open_set_mask[open_set_mask == (99-self.num_classes)] = self.ignore_index
 
         return train_mask, test_mask, open_set_mask
 

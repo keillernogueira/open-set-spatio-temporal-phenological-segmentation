@@ -14,7 +14,7 @@ def load_images(dataset_path, images, patch_size, mask_name="mask_train_test_int
             continue
         try:
             img = imageio.v2.imread(os.path.join(dataset_path, name))
-            print(name, img.shape)
+            # print(name, img.shape)
             # img_as_float(imageio.imread(os.path.join(dataset_path, name)))
         except IOError:
             raise IOError("Could not open file: ", os.path.join(dataset_path, name))

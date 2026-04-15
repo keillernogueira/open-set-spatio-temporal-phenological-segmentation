@@ -77,7 +77,7 @@ class GRSL(nn.Module):
 
 
 class FCN8s(nn.Module):
-    def __init__(self, num_branches, input_channels, num_classes, open_head=False):
+    def __init__(self, num_branches, input_channels, num_classes, dropout_p=0.5, open_head=False):
         super(FCN8s, self).__init__()
 
         # branches
@@ -141,7 +141,7 @@ class FCN8s(nn.Module):
             nn.Conv2d(256, 512, 1, stride=1, padding=0),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout2d()
+            nn.Dropout2d(p=dropout_p)
         )
 
         # fc7
@@ -149,7 +149,7 @@ class FCN8s(nn.Module):
             nn.Conv2d(512, 512, 1, stride=1, padding=0),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout2d()
+            nn.Dropout2d(p=dropout_p)
         )
 
         self.score_fr = nn.Conv2d(512, num_classes, 1)

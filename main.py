@@ -8,6 +8,7 @@ from networks import GRSL, FCN8s
 from dataloader import DataLoader, PatchDataLoader, load_images, create_distributions, create_patch_distributions
 from utils import *
 from openpcs import *
+from loss import *
 
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 
@@ -113,7 +114,7 @@ def train(train_loader, net, criterion, optimizer, epoch, ignore_index):
         train_loss.append(loss.data.item())
 
         # Printing.
-        if i > 0 and i % 3 == 0:
+        if i > 0 and i % 1 == 0:
             if type(net) is not GRSL:  # not pixelwise
                 labels = labels.numpy().flatten()
                 prds = prds.flatten()
@@ -165,6 +166,12 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--epoch_num', type=int, default=50, help='Number of epochs')
+    
+    # loss options
+    parser.add_argument('--loss', type=str, default="crossentropy", help='Loss function',
+                        choices=["crossentropy", "focal", "dice", "tversky", "focaldice"])
+    parser.add_argument('--loss_weights_method', type=str, default=None, help='Use weights for the loss function to handle class imbalance',
+                        choices=["inverse_freq", "inverse_sqrt", "median_freq", "effective_num"])
     args = parser.parse_args()
     print(args)
     assert args.network == 'grsl' or args.network == 'fcn'
@@ -222,18 +229,34 @@ if __name__ == '__main__':
         model = GRSL(len(args.images), 3, train_dataset.num_classes - 1).cuda()
         criterion = nn.CrossEntropyLoss().cuda()
     elif args.network == 'fcn':
-        model = FCN8s(len(images), images.shape[-1], train_dataset.num_classes - 1, 
+        model = FCN8s(len(images), images.shape[-1], train_dataset.num_classes - 1, dropout_p=0.5,
                       open_head=True if args.open_set_method == 'OpenLoss' else False).cuda()
         if args.open_set_method == 'OpenLoss':
             criterion = OpenSetLoss(num_classes - 1, ignore_index=num_classes).cuda()
         else:
-            criterion = nn.CrossEntropyLoss(ignore_index=num_classes).cuda()
+            weights = None
+            if args.loss_weights_method is not None:
+                weights = compute_class_weights(train_dataset.train_mask, num_classes-1, num_classes, method=args.loss_weights_method)
+                # weights[1] *= 5.0
+                
+            if args.loss == "crossentropy":
+                criterion = nn.CrossEntropyLoss(ignore_index=num_classes, weight=weights).cuda()
+            elif args.loss == "focal":
+                criterion = FocalLoss(ignore_index=num_classes, weight=weights)
+            elif args.loss == "dice":
+                criterion = MultiClassDiceLoss(num_classes-1, ignore_index=num_classes)
+            elif args.loss == "tversky":
+                criterion = TverskyLoss(num_classes-1, ignore_index=num_classes)
+            elif args.loss == "focaldice":
+                criterion = FocalDiceCombinationLoss(num_classes-1, focal_loss_weight=0.5, weight=weights, ignore_index=num_classes)
+            else:
+                raise NotImplementedError("Loss " + args.loss + " not implemented")
     else:
         raise NotImplementedError("Network " + args.network + " not implemented")
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
                            betas=(0.9, 0.99))
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)  # serra step_size=5
 
     if args.operation == 'train':
         curr_epoch = 1

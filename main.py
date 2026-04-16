@@ -1,4 +1,3 @@
-
 import os
 import sys
 import datetime
@@ -7,6 +6,7 @@ import joblib
 from networks import GRSL, FCN8s
 from dataloader import DataLoader, PatchDataLoader, load_images, create_distributions, create_patch_distributions
 from utils import *
+from nn_utils import *
 from openpcs import *
 from loss import *
 
@@ -172,6 +172,10 @@ if __name__ == '__main__':
                         choices=["crossentropy", "focal", "dice", "tversky", "focaldice"])
     parser.add_argument('--loss_weights_method', type=str, default=None, help='Use weights for the loss function to handle class imbalance',
                         choices=["inverse_freq", "inverse_sqrt", "median_freq", "effective_num"])
+    
+    # dataloader options
+    parser.add_argument('--weight_sampler', type=bool, default=False, help='Weight Sampler for dealing with class imbalance')
+    parser.add_argument('--hard_patch_mining', type=bool, default=False, help='Mine the hard samples during training')
     args = parser.parse_args()
     print(args)
     assert args.network == 'grsl' or args.network == 'fcn'
@@ -219,8 +223,14 @@ if __name__ == '__main__':
         train_dataset = PatchDataLoader('train', images, mask, train_data, args.patch_size, num_classes, args.hidden_class)
         test_dataset = PatchDataLoader('test', images, mask, test_data, args.patch_size, num_classes, args.hidden_class)
 
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
-                                                   shuffle=True, num_workers=4, drop_last=False)
+    if args.weight_sampler:
+        print("Using weight sampler")
+        sampler = build_weighted_sampler(train_dataset)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+                                                       sampler=sampler, num_workers=4, drop_last=False)
+    else:
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+                                                       shuffle=True, num_workers=4, drop_last=False)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                                   shuffle=False, num_workers=4, drop_last=False)
 
@@ -238,7 +248,9 @@ if __name__ == '__main__':
             if args.loss_weights_method is not None:
                 weights = compute_class_weights(train_dataset.train_mask, num_classes-1, num_classes, method=args.loss_weights_method)
                 # weights[1] *= 5.0
-                
+                # weights[4] *= 5.0
+                print("Using Loss Weights = ", weights)
+
             if args.loss == "crossentropy":
                 criterion = nn.CrossEntropyLoss(ignore_index=num_classes, weight=weights).cuda()
             elif args.loss == "focal":
@@ -263,6 +275,12 @@ if __name__ == '__main__':
         best_records = []
         print("Training")
         for epoch in range(curr_epoch, args.epoch_num + 1):
+            if args.hard_patch_mining and epoch % 5 == 0:  # update every 5 epochs
+                print(f"Epoch {epoch}: updated hard patch sampler")
+                sampler = update_sampler(model, train_dataset, temperature=0.5)
+                train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, 
+                                                               sampler=sampler, num_workers=4, drop_last=False)
+            
             train(train_dataloader, model, criterion, optimizer, epoch, ignore_index=num_classes)
 
             # Computing test.

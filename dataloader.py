@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from torch.utils import data
 
+import albumentations as A
+
 
 def load_images(dataset_path, images, patch_size, mask_name="mask_train_test_int.png"):
     data = []
@@ -154,6 +156,36 @@ def data_augmentation(img, msk=None, msk_true=None):
     return img, msk, msk_true
 
 
+def get_train_transforms(patch_size):
+    return A.ReplayCompose([
+        # geometric — applied to both image and mask
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.75),
+        A.ElasticTransform(
+            alpha=120, sigma=6, p=0.2,
+            interpolation=1,           # bilinear for image
+            mask_interpolation=0,      # nearest for mask — critical
+        ),
+        A.ShiftScaleRotate(
+            shift_limit=0.05, scale_limit=0.1,
+            rotate_limit=15, p=0.3,
+            border_mode=0,
+            mask_value=255,            # fill new mask pixels with ignore_index
+        ),
+
+        # spectral / radiometric — image only
+        A.RandomBrightnessContrast(p=0.4),
+        A.GaussNoise(p=0.3),
+        A.CoarseDropout(
+            max_holes=4, max_height=patch_size//8,
+            max_width=patch_size//8, p=0.2,
+            fill_value=0,
+            mask_fill_value=None,      # None = don't touch mask
+        ),
+    ])
+
+
 # Serra do Cipo dataset
 class DataLoader(data.Dataset):
     def __init__(self, mode, images, mask, distr_data, patch_size):
@@ -218,6 +250,8 @@ class PatchDataLoader(data.Dataset):
         self.ignore_index = num_classes
         self.open_set_class = num_classes + 1
         self.num_classes = num_classes
+        
+        self.transform = get_train_transforms(patch_size)
 
         self.train_mask, self.test_mask, self.open_set_mask = self.shift_mask()
         print('original mask', np.bincount(self.mask.flatten()))
@@ -283,6 +317,30 @@ class PatchDataLoader(data.Dataset):
 
         return cur_mask, openset_mask
 
+    def _apply_transform(self, img, mask):
+        """
+        Apply albumentations to multi-temporal image (T, H, W, C) + mask (H, W).
+        Spatial transforms must be consistent across all time steps.
+        We do this by applying the same transform with a fixed seed per sample.
+        """
+        # use first time step to get the transform parameters
+        sample  = self.transform(image=img[0], mask=mask)
+        mask_aug = sample['mask']
+
+        # apply ONLY the replay (same spatial ops) to remaining time steps
+        # albumentations ReplayCompose records which ops were applied
+        result = [sample['image']]  # (H, W, C)
+
+        # re-run with same seed for remaining time steps
+        replay = sample.get('replay', None)
+        # print(replay)
+        for t in range(1, img.shape[0]):
+            s = A.ReplayCompose.replay(replay, image=img[t])
+            result.append(s['image'])
+
+        img_aug = np.stack(result, axis=0)
+        return img_aug, mask_aug
+
     def __getitem__(self, index):
         cur_x = self.distr_data[index][0]
         cur_y = self.distr_data[index][1]
@@ -304,9 +362,10 @@ class PatchDataLoader(data.Dataset):
             "Wrong patch size " + str(len(cur_path[0])) + " x " + str(len(cur_path[0][0]))
 
         # normalization and data augmentation
-        cur_path = (cur_path / 255) - 0.5
+        cur_path = ((cur_path / 255) - 0.5).astype(np.float32)
         if self.mode == 'train':
-            cur_path, cur_mask, _ = data_augmentation(cur_path, cur_mask)
+            # cur_path, cur_mask, _ = data_augmentation(cur_path, cur_mask)  # manual
+            cur_path, cur_mask = self._apply_transform(cur_path, cur_mask)
         cur_path = np.transpose(cur_path, (0, 3, 1, 2))
 
         # Turning to tensors.

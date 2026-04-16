@@ -157,42 +157,6 @@ def evaluate_map(true_map, pred_map, num_classes, hidden_class, open_set_class=N
     return bacc, bacc_unknown
 
 
-def compute_class_weights(labels, num_classes, ignore_index, method="median_freq"):
-    """
-    Compute class weights for cross-entropy loss.
-
-    method : 'inverse_freq' | 'inverse_sqrt' | 'median_freq' | 'effective_num'
-    """
-    labels_np = np.asarray(labels).flatten()
-    labels_np = labels_np[labels_np != ignore_index]
-
-    # ── count samples per class ───────────────────────────────────────────────
-    counts = np.array([(labels_np == c).sum() for c in range(num_classes)], dtype=np.float64)
-    total  = counts.sum()
-    freq   = counts / total
-
-    # print("Class counts:", {c: int(counts[c]) for c in range(num_classes)})
-
-    if method == "inverse_freq":
-        weights = 1.0 / (freq + 1e-6)
-    elif method == "inverse_sqrt":
-        weights = 1.0 / (np.sqrt(freq) + 1e-6)
-    elif method == "median_freq":
-        # w_c = median(freq) / freq_c (SegNet paper)
-        weights = np.median(freq) / (freq + 1e-6)
-    elif method == "effective_num":
-        # from "Class-Balanced Loss Based on Effective Number of Samples" CVPR 2019
-        beta    = (total - 1.0) / total
-        weights = (1.0 - beta) / (1.0 - np.power(beta, counts + 1e-6))
-    else:
-        raise ValueError(f"Unknown method '{method}'.")
-
-    weights = weights / weights.sum() * num_classes
-    # print(f"Class weights ({method}):", {c: round(weights[c], 4) for c in range(num_classes)})
-
-    return torch.tensor(weights, dtype=torch.float32)
-
-
 def manipulate_itirapina_mask(mask):
     print(mask.shape, np.bincount(mask.ravel()))
     mask[mask == 0] = 13
